@@ -1,4 +1,4 @@
-use crate::TextComponent;
+use crate::{NbtValue, TextComponent};
 use std::borrow::Cow;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -14,10 +14,11 @@ pub struct CustomData {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 pub enum Payload {
     #[default]
     Empty,
-    // More payload data
+    Nbt(NbtValue),
 }
 impl Payload {
     pub fn is_empty(&self) -> bool {

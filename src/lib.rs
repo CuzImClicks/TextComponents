@@ -18,9 +18,12 @@ pub mod format;
 pub mod interactivity;
 #[cfg(feature = "nbt")]
 pub mod nbt;
+mod nbt_value;
 pub mod parse;
 pub mod resolving;
 pub mod translation;
+
+pub use nbt_value::NbtValue;
 
 /// A recursive rich text format with interaction capabilities.
 /// ### Styling
@@ -193,8 +196,11 @@ impl TextComponent {
     ) -> Self {
         TextComponent {
             content: Content::Object(Object::Atlas {
-                atlas: atlas.map(Into::into),
+                atlas: atlas
+                    .map(Into::into)
+                    .unwrap_or(Cow::Borrowed("minecraft:blocks")),
                 sprite: sprite.into(),
+                fallback: None,
             }),
             children: Vec::new(),
             format: Format::new(),
@@ -211,7 +217,11 @@ impl TextComponent {
     /// ```
     pub const fn player_head(player: ObjectPlayer, hat: bool) -> Self {
         TextComponent {
-            content: Content::Object(Object::Player { player, hat }),
+            content: Content::Object(Object::Player {
+                player,
+                hat,
+                fallback: None,
+            }),
             children: Vec::new(),
             format: Format::new(),
             interactions: Interactivity::new(),
@@ -256,10 +266,7 @@ impl TextComponent {
         TextComponent {
             content: Content::Resolvable(Resolvable::Entity {
                 selector: selector.into(),
-                separator: match separator {
-                    Some(separator) => Box::new(separator),
-                    None => Box::new(", ".color(Color::Gray)),
-                },
+                separator: separator.map(Box::new),
             }),
             children: Vec::new(),
             format: Format::new(),
@@ -287,11 +294,9 @@ impl TextComponent {
         TextComponent {
             content: Content::Resolvable(Resolvable::NBT {
                 path: path.into(),
-                interpret: if interpret { Some(true) } else { None },
-                separator: match separator {
-                    Some(separator) => Box::new(separator),
-                    None => Box::new(", ".into()),
-                },
+                interpret,
+                plain: false,
+                separator: separator.map(Box::new),
                 source,
             }),
             children: Vec::new(),

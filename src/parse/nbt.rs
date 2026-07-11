@@ -1,619 +1,813 @@
+use std::{borrow::Cow, error::Error, fmt::Display};
+
+#[cfg(feature = "custom")]
+use crate::custom::{CustomData, Payload};
 use crate::{
-    TextComponent,
-    content::{Content, NbtSource, Object, ObjectPlayer, PlayerProperties, Resolvable},
-    custom::CustomData,
+    NbtValue, TextComponent,
+    content::{
+        Content, NbtSource, Object, ObjectPlayer, PlayerModel, PlayerProperties, Resolvable,
+    },
     format::{Color, Format},
-    interactivity::{ClickEvent, HoverEvent, Interactivity},
+    interactivity::{ClickEvent, Dialog, HoverEvent, Interactivity},
     translation::TranslatedMessage,
 };
-
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 use uuid::Uuid;
 
-use std::borrow::Cow;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ComponentDecodeError {
+    ExpectedComponent,
+    EmptyComponentList,
+    MissingField(&'static str),
+    InvalidField {
+        field: &'static str,
+        expected: &'static str,
+    },
+    UnknownContentType(String),
+    UnknownObjectType(String),
+    UnknownDataSource(String),
+    UnknownClickAction(String),
+    UnknownHoverAction(String),
+    NoMatchingContent,
+    ConflictingNbtFlags,
+}
 
-impl TextComponent {
-    pub fn from_nbt(tag: &NbtTag) -> Option<Self> {
-        match tag {
-            NbtTag::String(string) => {
-                if string.is_empty() {
-                    return None;
-                }
-                Some(TextComponent::plain(string.to_string()))
+impl Display for ComponentDecodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExpectedComponent => formatter.write_str("expected a text component"),
+            Self::EmptyComponentList => formatter.write_str("component lists cannot be empty"),
+            Self::MissingField(field) => write!(formatter, "missing required field `{field}`"),
+            Self::InvalidField { field, expected } => {
+                write!(formatter, "field `{field}` must be {expected}")
             }
-            NbtTag::Compound(compound) => {
-                if let Some(tag) = compound.get("") {
-                    match tag {
-                        NbtTag::String(..) | NbtTag::List(..) => {
-                            return TextComponent::from_nbt(tag);
-                        }
-                        _ => (),
-                    }
-                }
-                let mut children = vec![];
-                if let Some(tag) = compound.get("extra")
-                    && let NbtTag::List(list) = tag
-                {
-                    for child in list.as_nbt_tags() {
-                        let child = TextComponent::from_nbt(&child);
-                        if let Some(child) = child {
-                            children.push(child);
-                        }
-                    }
-                }
-                Some(TextComponent {
-                    content: Content::from_compound(compound)?,
-                    children,
-                    format: Format::from_compound(compound),
-                    interactions: Interactivity::from_compound(compound),
-                })
+            Self::UnknownContentType(value) => {
+                write!(formatter, "unknown component type `{value}`")
             }
-            _ => None,
+            Self::UnknownObjectType(value) => write!(formatter, "unknown object type `{value}`"),
+            Self::UnknownDataSource(value) => write!(formatter, "unknown NBT source `{value}`"),
+            Self::UnknownClickAction(value) => write!(formatter, "unknown click action `{value}`"),
+            Self::UnknownHoverAction(value) => write!(formatter, "unknown hover action `{value}`"),
+            Self::NoMatchingContent => formatter.write_str("no matching component content"),
+            Self::ConflictingNbtFlags => {
+                formatter.write_str("`interpret` and `plain` cannot both be enabled")
+            }
         }
     }
+}
+
+impl Error for ComponentDecodeError {}
+
+impl TextComponent {
+    pub fn try_from_nbt(tag: &NbtTag) -> Result<Self, ComponentDecodeError> {
+        match tag {
+            NbtTag::String(value) => Ok(Self::plain(value.to_string())),
+            NbtTag::List(list) => component_from_list(list),
+            NbtTag::Compound(compound) => component_from_compound(compound),
+            _ => Err(ComponentDecodeError::ExpectedComponent),
+        }
+    }
+
+    /// Compatibility wrapper for callers that do not need parse diagnostics.
+    pub fn from_nbt(tag: &NbtTag) -> Option<Self> {
+        Self::try_from_nbt(tag).ok()
+    }
+}
+
+fn component_from_list(list: &NbtList) -> Result<TextComponent, ComponentDecodeError> {
+    let mut values = list.as_nbt_tags().into_iter();
+    let Some(first) = values.next() else {
+        return Err(ComponentDecodeError::EmptyComponentList);
+    };
+    let mut component = TextComponent::try_from_nbt(&first)?;
+    for value in values {
+        component
+            .children
+            .push(TextComponent::try_from_nbt(&value)?);
+    }
+    Ok(component)
+}
+
+fn component_from_compound(compound: &NbtCompound) -> Result<TextComponent, ComponentDecodeError> {
+    if compound.len() == 1
+        && let Some(value) = compound.get("")
+    {
+        return TextComponent::try_from_nbt(value);
+    }
+
+    let content = Content::try_from_compound(compound)?;
+    let children = match compound.get("extra") {
+        None => Vec::new(),
+        Some(NbtTag::List(list)) => {
+            let values = list.as_nbt_tags();
+            if values.is_empty() {
+                return Err(ComponentDecodeError::EmptyComponentList);
+            }
+            values
+                .iter()
+                .map(TextComponent::try_from_nbt)
+                .collect::<Result<Vec<_>, _>>()?
+        }
+        Some(_) => return Err(invalid("extra", "a non-empty component list")),
+    };
+
+    Ok(TextComponent {
+        content,
+        children,
+        format: Format::try_from_compound(compound)?,
+        interactions: Interactivity::try_from_compound(compound)?,
+    })
 }
 
 impl Content {
-    fn from_compound(compound: &NbtCompound) -> Option<Self> {
-        if let Some(tag) = compound.get("text")
-            && let NbtTag::String(text) = tag
-        {
-            return Some(Content::Text {
-                text: text.to_string().into(),
-            });
+    fn try_from_compound(compound: &NbtCompound) -> Result<Self, ComponentDecodeError> {
+        if let Some(content_type) = compound.get("type") {
+            let content_type = as_string(content_type)
+                .ok_or_else(|| invalid("type", "a component type string"))?;
+            return match content_type.as_str() {
+                "text" => parse_text(compound),
+                "translatable" => parse_translatable(compound),
+                "keybind" => parse_keybind(compound),
+                "score" => parse_score(compound),
+                "selector" => parse_selector(compound),
+                "nbt" => parse_nbt(compound),
+                "object" => parse_object(compound),
+                _ => Err(ComponentDecodeError::UnknownContentType(content_type)),
+            };
         }
-        if let Some(tag) = compound.get("translate")
-            && let NbtTag::String(key) = tag
-        {
-            let mut fallback = None;
-            let mut args = None;
-            if let Some(tag) = compound.get("fallback")
-                && let NbtTag::String(text) = tag
-            {
-                fallback = Some(Cow::Owned(text.to_string()));
-            }
-            if let Some(tag) = compound.get("with")
-                && let NbtTag::List(list) = tag
-            {
-                let mut args_vec = vec![];
-                for arg in list.as_nbt_tags() {
-                    if let Some(arg) = TextComponent::from_nbt(&arg) {
-                        args_vec.push(arg);
-                    }
-                }
-                args = Some(args_vec.into_boxed_slice());
-            }
 
-            return Some(Content::Translate(TranslatedMessage {
-                key: key.to_string().into(),
-                fallback,
-                args,
-            }));
+        if let Ok(content) = parse_text(compound) {
+            return Ok(content);
         }
-        if let Some(tag) = compound.get("keybind")
-            && let NbtTag::String(key) = tag
-        {
-            return Some(Content::Keybind {
-                keybind: key.to_string().into(),
-            });
+        if let Ok(content) = parse_translatable(compound) {
+            return Ok(content);
         }
-        if let Some(tag) = compound.get("score")
-            && let NbtTag::Compound(compound) = tag
-        {
-            let NbtTag::String(selector) = compound.get("name")? else {
-                return None;
-            };
-            let NbtTag::String(objective) = compound.get("objective")? else {
-                return None;
-            };
-            return Some(Content::Resolvable(Resolvable::Scoreboard {
-                selector: selector.to_string().into(),
-                objective: objective.to_string().into(),
-            }));
+        if let Ok(content) = parse_keybind(compound) {
+            return Ok(content);
         }
-        if let Some(tag) = compound.get("selector")
-            && let NbtTag::String(selector) = tag
-        {
-            let mut separator = Resolvable::entity_separator();
-            if let Some(tag) = compound.get("separator")
-                && let Some(component) = TextComponent::from_nbt(tag)
-            {
-                *separator = component;
-            };
-            return Some(Content::Resolvable(Resolvable::Entity {
-                selector: selector.to_string().into(),
-                separator,
-            }));
+        if let Ok(content) = parse_score(compound) {
+            return Ok(content);
         }
-        if let Some(tag) = compound.get("nbt")
-            && let NbtTag::String(path) = tag
-        {
-            let mut interpret = None;
-            let mut separator = Resolvable::entity_separator();
-            let mut source = NbtSource::Block(Cow::Borrowed(""));
-            let mut continues = true;
-            if let Some(tag) = compound.get("interpret") {
-                match tag {
-                    NbtTag::String(str) => {
-                        if str.to_str() == "true" {
-                            interpret = Some(true);
-                        } else if str.to_str() == "false" {
-                            interpret = Some(false);
-                        }
-                    }
-                    NbtTag::Byte(val) => interpret = Some(*val != 0),
-                    _ => (),
-                }
-            }
-            if let Some(tag) = compound.get("separator")
-                && let Some(component) = TextComponent::from_nbt(tag)
-            {
-                *separator = component;
-            };
-            if let Some(tag) = compound.get("source")
-                && let NbtTag::String(s_type) = tag
-            {
-                continues = false;
-                match &*s_type.to_str() {
-                    "block" => {
-                        if let Some(tag) = compound.get("block")
-                            && let NbtTag::String(text) = tag
-                        {
-                            source = NbtSource::Block(Cow::Owned(text.to_string()))
-                        }
-                    }
-                    "entity" => {
-                        if let Some(tag) = compound.get("entity")
-                            && let NbtTag::String(text) = tag
-                        {
-                            source = NbtSource::Entity(Cow::Owned(text.to_string()))
-                        }
-                    }
-                    "storage" => {
-                        if let Some(tag) = compound.get("storage")
-                            && let NbtTag::String(text) = tag
-                        {
-                            source = NbtSource::Storage(Cow::Owned(text.to_string()))
-                        }
-                    }
-                    _ => continues = true,
-                }
-            }
-            if continues
-                && let Some(tag) = compound.get("block")
-                && let NbtTag::String(text) = tag
-            {
-                source = NbtSource::Block(Cow::Owned(text.to_string()))
-            } else if continues
-                && let Some(tag) = compound.get("entity")
-                && let NbtTag::String(text) = tag
-            {
-                source = NbtSource::Entity(Cow::Owned(text.to_string()))
-            } else if continues
-                && let Some(tag) = compound.get("storage")
-                && let NbtTag::String(text) = tag
-            {
-                source = NbtSource::Storage(Cow::Owned(text.to_string()))
-            }
-            return Some(Content::Resolvable(Resolvable::NBT {
-                path: path.to_string().into(),
-                interpret,
-                separator,
-                source,
-            }));
+        if let Ok(content) = parse_selector(compound) {
+            return Ok(content);
         }
-        if let Some(tag) = compound.get("sprite")
-            && let NbtTag::String(sprite) = tag
-        {
-            let mut atlas = None;
-            if let Some(tag) = compound.get("atlas")
-                && let NbtTag::String(text) = tag
-            {
-                atlas = Some(text.to_string().into())
-            }
-
-            return Some(Content::Object(Object::Atlas {
-                atlas,
-                sprite: sprite.to_string().into(),
-            }));
+        if let Ok(content) = parse_nbt(compound) {
+            return Ok(content);
         }
-        if let Some(tag) = compound.get("object")
-            && let NbtTag::String(obj_type) = tag
-        {
-            match &*obj_type.to_str() {
-                "player" => {
-                    let mut player = ObjectPlayer {
-                        name: None,
-                        id: None,
-                        texture: None,
-                        properties: vec![],
-                    };
-                    let mut hat = true;
-                    if let Some(tag) = compound.get("player")
-                        && let NbtTag::Compound(compound) = tag
-                    {
-                        if let Some(tag) = compound.get("name")
-                            && let NbtTag::String(name) = tag
-                        {
-                            player.name = Some(Cow::Owned(name.to_string()))
-                        }
-                        if let Some(tag) = compound.get("id")
-                            && let NbtTag::IntArray(nums) = tag
-                            && nums.len() == 4
-                        {
-                            player.id = Some([nums[0], nums[1], nums[2], nums[3]])
-                        }
-                        if let Some(tag) = compound.get("texture")
-                            && let NbtTag::String(texture) = tag
-                        {
-                            player.texture = Some(Cow::Owned(texture.to_string()))
-                        }
-                        if let Some(tag) = compound.get("properties")
-                            && let NbtTag::List(NbtList::Compound(compounds)) = tag
-                        {
-                            for compound in compounds {
-                                if let Some(name_tag) = compound.get("name")
-                                    && let Some(value_tag) = compound.get("value")
-                                    && let NbtTag::String(name) = name_tag
-                                    && let NbtTag::String(value) = value_tag
-                                {
-                                    let mut signature = None;
-                                    if let Some(tag) = compound.get("signature")
-                                        && let NbtTag::String(text) = tag
-                                    {
-                                        signature = Some(text.to_string().into())
-                                    }
-                                    player.properties.push(PlayerProperties {
-                                        name: name.to_string().into(),
-                                        value: value.to_string().into(),
-                                        signature,
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    if let Some(tag) = compound.get("hat") {
-                        match tag {
-                            NbtTag::String(str) if str.to_str() == "false" => {
-                                hat = false;
-                            }
-                            NbtTag::Byte(val) => hat = *val != 0,
-                            _ => (),
-                        }
-                    }
-                    return Some(Content::Object(Object::Player { player, hat }));
-                }
-                _ => return None,
-            }
+        if let Ok(content) = parse_object(compound) {
+            return Ok(content);
         }
         #[cfg(feature = "custom")]
-        if let Some(tag) = compound.get("custom")
-            && let NbtTag::Compound(compound) = tag
-        {
-            return Some(Content::Custom(CustomData::from_compound(compound)?));
+        if let Ok(content) = parse_custom_content(compound) {
+            return Ok(content);
         }
 
-        None
+        Err(ComponentDecodeError::NoMatchingContent)
     }
 }
 
+fn parse_text(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    Ok(Content::Text {
+        text: required_string(compound, "text")?.into(),
+    })
+}
+
+fn parse_translatable(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    let key = required_string(compound, "translate")?;
+    let fallback = compound.get("fallback").and_then(as_string).map(Cow::Owned);
+    let args = match compound.get("with") {
+        None => None,
+        Some(NbtTag::List(list)) => Some(
+            list.as_nbt_tags()
+                .iter()
+                .map(TextComponent::try_from_nbt)
+                .collect::<Result<Vec<_>, _>>()?
+                .into_boxed_slice(),
+        ),
+        Some(_) => return Err(invalid("with", "a component list")),
+    };
+    Ok(Content::Translate(TranslatedMessage {
+        key: key.into(),
+        fallback,
+        args,
+    }))
+}
+
+fn parse_keybind(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    Ok(Content::Keybind {
+        keybind: required_string(compound, "keybind")?.into(),
+    })
+}
+
+fn parse_score(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    let score = required_compound(compound, "score")?;
+    Ok(Content::Resolvable(Resolvable::Scoreboard {
+        selector: required_string(score, "name")?.into(),
+        objective: required_string(score, "objective")?.into(),
+    }))
+}
+
+fn parse_selector(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    let selector = required_string(compound, "selector")?;
+    let separator = match compound.get("separator") {
+        Some(tag) => Some(Box::new(TextComponent::try_from_nbt(tag)?)),
+        None => None,
+    };
+    Ok(Content::Resolvable(Resolvable::Entity {
+        selector: selector.into(),
+        separator,
+    }))
+}
+
+fn parse_nbt(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    let path = required_string(compound, "nbt")?;
+    let interpret = compound.get("interpret").and_then(as_bool).unwrap_or(false);
+    let plain = compound.get("plain").and_then(as_bool).unwrap_or(false);
+    if interpret && plain {
+        return Err(ComponentDecodeError::ConflictingNbtFlags);
+    }
+    let separator = compound
+        .get("separator")
+        .and_then(|tag| TextComponent::try_from_nbt(tag).ok())
+        .map(Box::new);
+    Ok(Content::Resolvable(Resolvable::NBT {
+        path: path.into(),
+        interpret,
+        plain,
+        separator,
+        source: parse_nbt_source(compound)?,
+    }))
+}
+
+fn parse_nbt_source(compound: &NbtCompound) -> Result<NbtSource, ComponentDecodeError> {
+    if let Some(source) = compound.get("source") {
+        let source = as_string(source).ok_or_else(|| invalid("source", "a source type string"))?;
+        return match source.as_str() {
+            "entity" => Ok(NbtSource::Entity(
+                required_string(compound, "entity")?.into(),
+            )),
+            "block" => Ok(NbtSource::Block(required_string(compound, "block")?.into())),
+            "storage" => Ok(NbtSource::Storage(
+                required_identifier(compound, "storage")?.into(),
+            )),
+            _ => Err(ComponentDecodeError::UnknownDataSource(source)),
+        };
+    }
+
+    if let Ok(entity) = required_string(compound, "entity") {
+        return Ok(NbtSource::Entity(entity.into()));
+    }
+    if let Ok(block) = required_string(compound, "block") {
+        return Ok(NbtSource::Block(block.into()));
+    }
+    if let Ok(storage) = required_identifier(compound, "storage") {
+        return Ok(NbtSource::Storage(storage.into()));
+    }
+    Err(ComponentDecodeError::MissingField(
+        "entity, block, or storage",
+    ))
+}
+
+fn parse_object(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    let fallback = match compound.get("fallback") {
+        Some(value) => Some(Box::new(TextComponent::try_from_nbt(value)?)),
+        None => None,
+    };
+    let object_type = optional_string(compound, "object")?;
+    match object_type.as_deref() {
+        Some("atlas") => parse_atlas(compound, fallback),
+        Some("player") => parse_player(compound, fallback),
+        Some(value) => Err(ComponentDecodeError::UnknownObjectType(value.to_owned())),
+        None if compound.contains("sprite") => parse_atlas(compound, fallback),
+        None if compound.contains("player") => parse_player(compound, fallback),
+        None => Err(ComponentDecodeError::NoMatchingContent),
+    }
+}
+
+fn parse_atlas(
+    compound: &NbtCompound,
+    fallback: Option<Box<TextComponent>>,
+) -> Result<Content, ComponentDecodeError> {
+    let atlas = optional_identifier(compound, "atlas")?
+        .map_or(Cow::Borrowed("minecraft:blocks"), Cow::Owned);
+    let sprite = required_identifier(compound, "sprite")?;
+    Ok(Content::Object(Object::Atlas {
+        atlas,
+        sprite: sprite.into(),
+        fallback,
+    }))
+}
+
+fn parse_player(
+    compound: &NbtCompound,
+    fallback: Option<Box<TextComponent>>,
+) -> Result<Content, ComponentDecodeError> {
+    let player = compound
+        .get("player")
+        .ok_or(ComponentDecodeError::MissingField("player"))?;
+    let player = match player {
+        NbtTag::String(name) => {
+            let name = name.to_string();
+            validate_player_name(&name)?;
+            ObjectPlayer::name(name)
+        }
+        NbtTag::Compound(profile) => parse_player_profile(profile)?,
+        _ => return Err(invalid("player", "a player name or profile")),
+    };
+    let hat = compound.get("hat").and_then(as_bool).unwrap_or(true);
+    Ok(Content::Object(Object::Player {
+        player,
+        hat,
+        fallback,
+    }))
+}
+
+fn parse_player_profile(profile: &NbtCompound) -> Result<ObjectPlayer, ComponentDecodeError> {
+    let name = optional_string(profile, "name")?;
+    if let Some(name) = &name {
+        validate_player_name(name)?;
+    }
+    let id = match profile.get("id") {
+        None => None,
+        Some(NbtTag::IntArray(values)) if values.len() == 4 => {
+            Some([values[0], values[1], values[2], values[3]])
+        }
+        Some(NbtTag::List(NbtList::Int(values))) if values.len() == 4 => {
+            Some([values[0], values[1], values[2], values[3]])
+        }
+        Some(_) => return Err(invalid("id", "a four-integer UUID")),
+    };
+    let texture = optional_identifier(profile, "texture")?.map(Cow::Owned);
+    let cape = optional_identifier(profile, "cape")?.map(Cow::Owned);
+    let elytra = optional_identifier(profile, "elytra")?.map(Cow::Owned);
+    let model = match optional_string(profile, "model")?.as_deref() {
+        None => None,
+        Some("slim") => Some(PlayerModel::Slim),
+        Some("wide") => Some(PlayerModel::Wide),
+        Some(_) => return Err(invalid("model", "`slim` or `wide`")),
+    };
+
+    Ok(ObjectPlayer {
+        name: name.map(Cow::Owned),
+        id,
+        texture,
+        cape,
+        elytra,
+        model,
+        properties: parse_properties(profile.get("properties"))?,
+    })
+}
+
+fn parse_properties(tag: Option<&NbtTag>) -> Result<Vec<PlayerProperties>, ComponentDecodeError> {
+    let Some(tag) = tag else {
+        return Ok(Vec::new());
+    };
+    let properties = match tag {
+        NbtTag::List(NbtList::Compound(properties)) => properties
+            .iter()
+            .map(|property| {
+                Ok(PlayerProperties {
+                    name: required_string(property, "name")?.into(),
+                    value: required_string(property, "value")?.into(),
+                    signature: optional_string(property, "signature")?.map(Cow::Owned),
+                })
+            })
+            .collect::<Result<Vec<_>, ComponentDecodeError>>()?,
+        NbtTag::Compound(properties) => {
+            let mut result = Vec::new();
+            for (name, values) in properties.iter() {
+                let NbtTag::List(NbtList::String(values)) = values else {
+                    return Err(invalid("properties", "a property map or list"));
+                };
+                for value in values {
+                    result.push(PlayerProperties {
+                        name: name.to_string().into(),
+                        value: value.to_string().into(),
+                        signature: None,
+                    });
+                }
+            }
+            result
+        }
+        _ => return Err(invalid("properties", "a property map or list")),
+    };
+    if properties.len() > 16 {
+        return Err(invalid("properties", "at most 16 properties"));
+    }
+    Ok(properties)
+}
+
+#[cfg(feature = "custom")]
+fn parse_custom_content(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
+    let custom = required_compound(compound, "custom")?;
+    Ok(Content::Custom(parse_custom_data(custom)?))
+}
+
 impl Format {
-    fn from_compound(compound: &NbtCompound) -> Self {
-        let mut format = Format::new();
-        if let Some(tag) = compound.get("color")
-            && let NbtTag::String(color) = tag
-        {
-            let color = color.to_string();
-            if color.starts_with("#") {
-                format = format.color_hex(&color);
-            }
-            match color.as_str() {
-                "aqua" => format = format.color(Color::Aqua),
-                "black" => format = format.color(Color::Black),
-                "blue" => format = format.color(Color::Blue),
-                "dark_aqua" => format = format.color(Color::DarkAqua),
-                "dark_blue" => format = format.color(Color::DarkBlue),
-                "dark_gray" => format = format.color(Color::DarkGray),
-                "dark_green" => format = format.color(Color::DarkGreen),
-                "dark_purple" => format = format.color(Color::DarkPurple),
-                "dark_red" => format = format.color(Color::DarkRed),
-                "gold" => format = format.color(Color::Gold),
-                "gray" => format = format.color(Color::Gray),
-                "green" => format = format.color(Color::Green),
-                "light_purple" => format = format.color(Color::LightPurple),
-                "red" => format = format.color(Color::Red),
-                "white" => format = format.color(Color::White),
-                "yellow" => format = format.color(Color::Yellow),
-                _ => (),
-            }
-        }
-        if let Some(tag) = compound.get("font")
-            && let NbtTag::String(color) = tag
-        {
-            format = format.font(color.to_string());
-        }
-        if let Some(tag) = compound.get("bold") {
-            match tag {
-                NbtTag::String(str) => {
-                    if str.to_str() == "true" {
-                        format = format.bold(true);
-                    } else if str.to_str() == "false" {
-                        format = format.bold(false);
-                    }
-                }
-                NbtTag::Byte(val) => format = format.bold(*val != 0),
-                _ => (),
-            }
-        }
-        if let Some(tag) = compound.get("italic") {
-            match tag {
-                NbtTag::String(str) => {
-                    if str.to_str() == "true" {
-                        format = format.italic(true);
-                    } else if str.to_str() == "false" {
-                        format = format.italic(false);
-                    }
-                }
-                NbtTag::Byte(val) => format = format.italic(*val != 0),
-                _ => (),
-            }
-        }
-        if let Some(tag) = compound.get("underlined") {
-            match tag {
-                NbtTag::String(str) => {
-                    if str.to_str() == "true" {
-                        format = format.underlined(true);
-                    } else if str.to_str() == "false" {
-                        format = format.underlined(false);
-                    }
-                }
-                NbtTag::Byte(val) => format = format.underlined(*val != 0),
-                _ => (),
-            }
-        }
-        if let Some(tag) = compound.get("strikethrough") {
-            match tag {
-                NbtTag::String(str) => {
-                    if str.to_str() == "true" {
-                        format = format.strikethrough(true);
-                    } else if str.to_str() == "false" {
-                        format = format.strikethrough(false);
-                    }
-                }
-                NbtTag::Byte(val) => format = format.strikethrough(*val != 0),
-                _ => (),
-            }
-        }
-        if let Some(tag) = compound.get("obfuscated") {
-            match tag {
-                NbtTag::String(str) => {
-                    if str.to_str() == "true" {
-                        format = format.obfuscated(true);
-                    } else if str.to_str() == "false" {
-                        format = format.obfuscated(false);
-                    }
-                }
-                NbtTag::Byte(val) => format = format.obfuscated(*val != 0),
-                _ => (),
-            }
-        }
-        if let Some(tag) = compound.get("shadow_color") {
-            match tag {
-                NbtTag::Short(n) => format.shadow_color = Some(*n as i64),
-                NbtTag::Int(n) => format.shadow_color = Some(*n as i64),
-                NbtTag::Long(n) => format.shadow_color = Some(*n),
-                NbtTag::List(list) => {
-                    let list = list.as_nbt_tags();
-                    if list.len() == 4 {
-                        let mut nums = vec![];
-                        for item in list {
-                            match item {
-                                NbtTag::Float(n) => nums.push((n * 255.) as u8),
-                                NbtTag::Double(n) => nums.push((n * 255.) as u8),
-                                _ => break,
-                            }
-                        }
-                        if nums.len() == 4 {
-                            format = format.shadow_color(nums[3], nums[0], nums[1], nums[2]);
-                        }
-                    }
-                }
-                _ => (),
-            }
-        }
-        format
+    fn try_from_compound(compound: &NbtCompound) -> Result<Self, ComponentDecodeError> {
+        let color = match optional_string(compound, "color")? {
+            Some(value) => Some(parse_color(&value)?),
+            None => None,
+        };
+        let font = optional_identifier(compound, "font")?.map(Cow::Owned);
+        Ok(Self {
+            color,
+            font,
+            bold: optional_bool(compound, "bold")?,
+            italic: optional_bool(compound, "italic")?,
+            underlined: optional_bool(compound, "underlined")?,
+            strikethrough: optional_bool(compound, "strikethrough")?,
+            obfuscated: optional_bool(compound, "obfuscated")?,
+            shadow_color: match compound.get("shadow_color") {
+                Some(tag) => Some(parse_shadow_color(tag)?),
+                None => None,
+            },
+        })
     }
 }
 
 impl Interactivity {
-    fn from_compound(compound: &NbtCompound) -> Self {
-        let mut interaction = Interactivity::new();
-        if let Some(tag) = compound.get("insertion")
-            && let NbtTag::String(insertion) = tag
-        {
-            interaction.insertion = Some(Cow::Owned(insertion.to_string()));
-        }
-
-        if let Some(tag) = compound.get("click_event")
-            && let NbtTag::Compound(event) = tag
-        {
-            interaction.click = ClickEvent::from_compound(event);
-        }
-        if let Some(tag) = compound.get("hover_event")
-            && let NbtTag::Compound(event) = tag
-        {
-            interaction.hover = HoverEvent::from_compound(event);
-        }
-        interaction
-    }
-}
-
-impl HoverEvent {
-    fn from_compound(compound: &NbtCompound) -> Option<Self> {
-        let tag = compound.get("action")?;
-        if let NbtTag::String(event) = tag {
-            return match &*event.to_str() {
-                "show_text" => {
-                    let value = compound.get("value")?;
-                    let compound = TextComponent::from_nbt(value)?;
-                    Some(HoverEvent::ShowText {
-                        value: Box::new(compound),
-                    })
-                }
-                "show_item" => {
-                    let id = compound.get("id")?;
-                    match id {
-                        NbtTag::String(id) => {
-                            let mut count = None;
-                            let mut components = None;
-                            if let Some(tag) = compound.get("count")
-                                && let NbtTag::Int(n) = tag
-                            {
-                                count = Some(*n);
-                            }
-                            if let Some(tag) = compound.get("components")
-                                && let NbtTag::Compound(comps) = tag
-                            {
-                                let mut data = vec![];
-                                comps.write(&mut data);
-                                if let Ok(comps) = String::from_utf8(data) {
-                                    components = Some(comps.into());
-                                }
-                            }
-                            Some(HoverEvent::ShowItem {
-                                id: id.to_string().into(),
-                                count,
-                                components,
-                            })
-                        }
-                        _ => None,
-                    }
-                }
-                "show_entity" => {
-                    let id = compound.get("id")?;
-                    let uuid = compound.get("uuid")?;
-                    let uuid: Uuid = match uuid {
-                        NbtTag::String(uuid) => Uuid::parse_str(&uuid.to_string()).ok()?,
-                        NbtTag::IntArray(nums) | NbtTag::List(NbtList::Int(nums)) => {
-                            if nums.len() != 4 {
-                                return None;
-                            }
-                            Uuid::from_u64_pair(
-                                (((nums[0] as u32) as u64) << 32) + ((nums[1] as u32) as u64),
-                                (((nums[2] as u32) as u64) << 32) + ((nums[3] as u32) as u64),
-                            )
-                        }
-                        _ => return None,
-                    };
-                    match id {
-                        NbtTag::String(id) => {
-                            let mut name = None;
-                            if let Some(name_nbt) = compound.get("name")
-                                && let Some(compound) = TextComponent::from_nbt(name_nbt)
-                            {
-                                name = Some(Box::new(compound))
-                            }
-                            Some(HoverEvent::ShowEntity {
-                                name,
-                                id: id.to_string().into(),
-                                uuid,
-                            })
-                        }
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-        }
-        None
+    fn try_from_compound(compound: &NbtCompound) -> Result<Self, ComponentDecodeError> {
+        Ok(Self {
+            insertion: optional_string(compound, "insertion")?.map(Cow::Owned),
+            click: match compound.get("click_event") {
+                Some(NbtTag::Compound(event)) => Some(ClickEvent::try_from_compound(event)?),
+                Some(_) => return Err(invalid("click_event", "a click event")),
+                None => None,
+            },
+            hover: match compound.get("hover_event") {
+                Some(NbtTag::Compound(event)) => Some(HoverEvent::try_from_compound(event)?),
+                Some(_) => return Err(invalid("hover_event", "a hover event")),
+                None => None,
+            },
+        })
     }
 }
 
 impl ClickEvent {
-    fn from_compound(compound: &NbtCompound) -> Option<Self> {
-        let tag = compound.get("action")?;
-        if let NbtTag::String(event) = tag {
-            return match &*event.to_str() {
-                "open_url" => {
-                    if let Some(tag) = compound.get("url")
-                        && let NbtTag::String(url) = tag
-                    {
-                        return Some(ClickEvent::OpenUrl {
-                            url: url.to_string().into(),
-                        });
-                    }
-                    None
+    fn try_from_compound(compound: &NbtCompound) -> Result<Self, ComponentDecodeError> {
+        let action = required_string(compound, "action")?;
+        match action.as_str() {
+            "open_url" => {
+                let url = required_string(compound, "url")?;
+                if !is_allowed_url(&url) {
+                    return Err(invalid("url", "an HTTP or HTTPS URI"));
                 }
-                "run_command" => {
-                    if let Some(tag) = compound.get("command")
-                        && let NbtTag::String(command) = tag
-                    {
-                        return Some(ClickEvent::RunCommand {
-                            command: command.to_string().into(),
-                        });
-                    }
-                    None
+                Ok(Self::OpenUrl { url: url.into() })
+            }
+            "run_command" => Ok(Self::RunCommand {
+                command: required_chat_string(compound, "command")?.into(),
+            }),
+            "suggest_command" => Ok(Self::SuggestCommand {
+                command: required_chat_string(compound, "command")?.into(),
+            }),
+            "change_page" => {
+                let page = required_i32(compound, "page")?;
+                if page <= 0 {
+                    return Err(invalid("page", "a positive integer"));
                 }
-                "suggest_command" => {
-                    if let Some(tag) = compound.get("command")
-                        && let NbtTag::String(command) = tag
-                    {
-                        return Some(ClickEvent::SuggestCommand {
-                            command: command.to_string().into(),
-                        });
+                Ok(Self::ChangePage { page })
+            }
+            "copy_to_clipboard" => Ok(Self::CopyToClipboard {
+                value: required_string(compound, "value")?.into(),
+            }),
+            "show_dialog" => {
+                let dialog = compound
+                    .get("dialog")
+                    .ok_or(ComponentDecodeError::MissingField("dialog"))?;
+                let dialog = match dialog {
+                    NbtTag::String(value) => {
+                        let value = value.to_string();
+                        if !is_identifier(&value) {
+                            return Err(invalid("dialog", "a dialog identifier or definition"));
+                        }
+                        Dialog::Reference(value.into())
                     }
-                    None
-                }
-                "change_page" => {
-                    if let Some(tag) = compound.get("page")
-                        && let NbtTag::Int(page) = tag
-                    {
-                        return Some(ClickEvent::ChangePage { page: *page });
-                    }
-                    None
-                }
-                "copy_to_clipboard" => {
-                    if let Some(tag) = compound.get("value")
-                        && let NbtTag::String(value) = tag
-                    {
-                        return Some(ClickEvent::CopyToClipboard {
-                            value: value.to_string().into(),
-                        });
-                    }
-                    None
-                }
-                "show_dialog" => {
-                    if let Some(tag) = compound.get("dialog")
-                        && let NbtTag::String(dialog) = tag
-                    {
-                        return Some(ClickEvent::ShowDialog {
-                            dialog: dialog.to_string().into(),
-                        });
-                    }
-                    None
-                }
-                #[cfg(feature = "custom")]
-                "custom" => Some(ClickEvent::Custom(CustomData::from_compound(compound)?)),
-                _ => None,
-            };
+                    NbtTag::Compound(_) => Dialog::Inline(dialog.clone().into()),
+                    _ => return Err(invalid("dialog", "a dialog identifier or definition")),
+                };
+                Ok(Self::ShowDialog { dialog })
+            }
+            #[cfg(feature = "custom")]
+            "custom" => Ok(Self::Custom(parse_custom_data(compound)?)),
+            _ => Err(ComponentDecodeError::UnknownClickAction(action)),
         }
-        None
+    }
+}
+
+impl HoverEvent {
+    fn try_from_compound(compound: &NbtCompound) -> Result<Self, ComponentDecodeError> {
+        let action = required_string(compound, "action")?;
+        match action.as_str() {
+            "show_text" => Ok(Self::ShowText {
+                value: Box::new(TextComponent::try_from_nbt(
+                    compound
+                        .get("value")
+                        .ok_or(ComponentDecodeError::MissingField("value"))?,
+                )?),
+            }),
+            "show_item" => {
+                let count = match compound.get("count") {
+                    None => 1,
+                    Some(tag) => {
+                        let count = as_i32(tag).ok_or_else(|| invalid("count", "an integer"))?;
+                        if !(1..=99).contains(&count) {
+                            return Err(invalid("count", "an integer from 1 through 99"));
+                        }
+                        count
+                    }
+                };
+                let components = match compound.get("components") {
+                    None => None,
+                    Some(NbtTag::Compound(components)) if components.is_empty() => None,
+                    Some(NbtTag::Compound(components)) => {
+                        Some(NbtValue::from(NbtTag::Compound(components.clone())))
+                    }
+                    Some(_) => return Err(invalid("components", "a data component patch")),
+                };
+                Ok(Self::ShowItem {
+                    id: required_identifier(compound, "id")?.into(),
+                    count,
+                    components,
+                })
+            }
+            "show_entity" => {
+                let uuid = parse_uuid(
+                    compound
+                        .get("uuid")
+                        .ok_or(ComponentDecodeError::MissingField("uuid"))?,
+                )?;
+                let name = match compound.get("name") {
+                    Some(name) => Some(Box::new(TextComponent::try_from_nbt(name)?)),
+                    None => None,
+                };
+                Ok(Self::ShowEntity {
+                    name,
+                    id: required_identifier(compound, "id")?.into(),
+                    uuid,
+                })
+            }
+            _ => Err(ComponentDecodeError::UnknownHoverAction(action)),
+        }
     }
 }
 
 #[cfg(feature = "custom")]
-impl CustomData {
-    fn from_compound(compound: &NbtCompound) -> Option<Self> {
-        use crate::custom::{CustomData, Payload};
+fn parse_custom_data(compound: &NbtCompound) -> Result<CustomData, ComponentDecodeError> {
+    let payload = compound
+        .get("payload")
+        .map_or(Payload::Empty, |value| Payload::Nbt(value.clone().into()));
+    Ok(CustomData {
+        id: required_identifier(compound, "id")?.into(),
+        payload,
+    })
+}
 
-        let tag = compound.get("id")?;
-        if let NbtTag::String(id) = tag {
-            return Some(CustomData {
-                id: id.to_string().into(),
-                // TODO: End payload serialization
-                payload: Payload::Empty,
-            });
+fn parse_uuid(tag: &NbtTag) -> Result<Uuid, ComponentDecodeError> {
+    match tag {
+        NbtTag::String(value) => {
+            Uuid::parse_str(&value.to_string()).map_err(|_| invalid("uuid", "a UUID"))
         }
-        None
+        NbtTag::IntArray(values) | NbtTag::List(NbtList::Int(values)) if values.len() == 4 => {
+            Ok(Uuid::from_u64_pair(
+                (u64::from(values[0] as u32) << 32) | u64::from(values[1] as u32),
+                (u64::from(values[2] as u32) << 32) | u64::from(values[3] as u32),
+            ))
+        }
+        _ => Err(invalid("uuid", "a UUID")),
     }
+}
+
+fn parse_color(value: &str) -> Result<Color, ComponentDecodeError> {
+    let color = match value {
+        "aqua" => Color::Aqua,
+        "black" => Color::Black,
+        "blue" => Color::Blue,
+        "dark_aqua" => Color::DarkAqua,
+        "dark_blue" => Color::DarkBlue,
+        "dark_gray" => Color::DarkGray,
+        "dark_green" => Color::DarkGreen,
+        "dark_purple" => Color::DarkPurple,
+        "dark_red" => Color::DarkRed,
+        "gold" => Color::Gold,
+        "gray" => Color::Gray,
+        "green" => Color::Green,
+        "light_purple" => Color::LightPurple,
+        "red" => Color::Red,
+        "white" => Color::White,
+        "yellow" => Color::Yellow,
+        value => {
+            let Some(hex) = value.strip_prefix('#') else {
+                return Err(invalid("color", "a text color"));
+            };
+            let rgb = u32::from_str_radix(hex, 16)
+                .ok()
+                .filter(|_| !hex.is_empty())
+                .filter(|value| *value <= 0x00ff_ffff)
+                .ok_or_else(|| invalid("color", "a text color"))?;
+            Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+        }
+    };
+    Ok(color)
+}
+
+fn parse_shadow_color(tag: &NbtTag) -> Result<i32, ComponentDecodeError> {
+    if let Some(value) = as_i32(tag) {
+        return Ok(value);
+    }
+    let NbtTag::List(list) = tag else {
+        return Err(invalid(
+            "shadow_color",
+            "an ARGB integer or four-number list",
+        ));
+    };
+    let values = list.as_nbt_tags();
+    if values.len() != 4 {
+        return Err(invalid(
+            "shadow_color",
+            "an ARGB integer or four-number list",
+        ));
+    }
+    let mut channels = [0_u32; 4];
+    for (channel, value) in channels.iter_mut().zip(values.iter()) {
+        let value = as_f32(value)
+            .ok_or_else(|| invalid("shadow_color", "an ARGB integer or four-number list"))?;
+        *channel = ((value * 255.0).floor() as i32 as u32) & 0xff;
+    }
+    Ok(((channels[3] << 24) | (channels[0] << 16) | (channels[1] << 8) | channels[2]) as i32)
+}
+
+fn required_compound<'a>(
+    compound: &'a NbtCompound,
+    field: &'static str,
+) -> Result<&'a NbtCompound, ComponentDecodeError> {
+    match compound.get(field) {
+        Some(NbtTag::Compound(value)) => Ok(value),
+        Some(_) => Err(invalid(field, "a compound")),
+        None => Err(ComponentDecodeError::MissingField(field)),
+    }
+}
+
+fn required_string(
+    compound: &NbtCompound,
+    field: &'static str,
+) -> Result<String, ComponentDecodeError> {
+    match compound.get(field) {
+        Some(NbtTag::String(value)) => Ok(value.to_string()),
+        Some(_) => Err(invalid(field, "a string")),
+        None => Err(ComponentDecodeError::MissingField(field)),
+    }
+}
+
+fn optional_string(
+    compound: &NbtCompound,
+    field: &'static str,
+) -> Result<Option<String>, ComponentDecodeError> {
+    match compound.get(field) {
+        Some(NbtTag::String(value)) => Ok(Some(value.to_string())),
+        Some(_) => Err(invalid(field, "a string")),
+        None => Ok(None),
+    }
+}
+
+fn required_identifier(
+    compound: &NbtCompound,
+    field: &'static str,
+) -> Result<String, ComponentDecodeError> {
+    let value = required_string(compound, field)?;
+    if !is_identifier(&value) {
+        return Err(invalid(field, "an identifier"));
+    }
+    Ok(value)
+}
+
+fn optional_identifier(
+    compound: &NbtCompound,
+    field: &'static str,
+) -> Result<Option<String>, ComponentDecodeError> {
+    let Some(value) = optional_string(compound, field)? else {
+        return Ok(None);
+    };
+    if !is_identifier(&value) {
+        return Err(invalid(field, "an identifier"));
+    }
+    Ok(Some(value))
+}
+
+fn required_chat_string(
+    compound: &NbtCompound,
+    field: &'static str,
+) -> Result<String, ComponentDecodeError> {
+    let value = required_string(compound, field)?;
+    if value
+        .chars()
+        .any(|character| character == '\u{a7}' || character < ' ' || character == '\u{7f}')
+    {
+        return Err(invalid(field, "a chat string"));
+    }
+    Ok(value)
+}
+
+fn optional_bool(
+    compound: &NbtCompound,
+    field: &'static str,
+) -> Result<Option<bool>, ComponentDecodeError> {
+    match compound.get(field) {
+        Some(value) => as_bool(value)
+            .map(Some)
+            .ok_or_else(|| invalid(field, "a boolean")),
+        None => Ok(None),
+    }
+}
+
+fn required_i32(compound: &NbtCompound, field: &'static str) -> Result<i32, ComponentDecodeError> {
+    compound
+        .get(field)
+        .and_then(as_i32)
+        .ok_or_else(|| match compound.get(field) {
+            Some(_) => invalid(field, "an integer"),
+            None => ComponentDecodeError::MissingField(field),
+        })
+}
+
+fn as_string(tag: &NbtTag) -> Option<String> {
+    match tag {
+        NbtTag::String(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn as_bool(tag: &NbtTag) -> Option<bool> {
+    as_f64(tag).map(|value| value != 0.0)
+}
+
+fn as_i32(tag: &NbtTag) -> Option<i32> {
+    match tag {
+        NbtTag::Byte(value) => Some(i32::from(*value)),
+        NbtTag::Short(value) => Some(i32::from(*value)),
+        NbtTag::Int(value) => Some(*value),
+        NbtTag::Long(value) => Some(*value as i32),
+        NbtTag::Float(value) => Some(*value as i32),
+        NbtTag::Double(value) => Some(*value as i32),
+        _ => None,
+    }
+}
+
+fn as_f32(tag: &NbtTag) -> Option<f32> {
+    as_f64(tag).map(|value| value as f32)
+}
+
+fn as_f64(tag: &NbtTag) -> Option<f64> {
+    match tag {
+        NbtTag::Byte(value) => Some(f64::from(*value)),
+        NbtTag::Short(value) => Some(f64::from(*value)),
+        NbtTag::Int(value) => Some(f64::from(*value)),
+        NbtTag::Long(value) => Some(*value as f64),
+        NbtTag::Float(value) => Some(f64::from(*value)),
+        NbtTag::Double(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn validate_player_name(value: &str) -> Result<(), ComponentDecodeError> {
+    if value.encode_utf16().count() > 16
+        || value
+            .chars()
+            .any(|character| character <= ' ' || character >= '\u{7f}')
+    {
+        return Err(invalid("name", "a valid player name"));
+    }
+    Ok(())
+}
+
+fn is_identifier(value: &str) -> bool {
+    let (namespace, path) = value
+        .split_once(':')
+        .map_or(("minecraft", value), |(namespace, path)| (namespace, path));
+    namespace != ".."
+        && namespace.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || character == '_'
+                || character == '-'
+                || character == '.'
+        })
+        && path.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '_' | '-' | '.' | '/')
+        })
+}
+
+fn is_allowed_url(value: &str) -> bool {
+    let Some((scheme, remainder)) = value.split_once(':') else {
+        return false;
+    };
+    matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+        && !remainder.is_empty()
+        && !value.chars().any(char::is_whitespace)
+}
+
+const fn invalid(field: &'static str, expected: &'static str) -> ComponentDecodeError {
+    ComponentDecodeError::InvalidField { field, expected }
 }

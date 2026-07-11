@@ -20,7 +20,7 @@ categories = [
 
 [features]
 custom = []
-nbt = ["dep:simdnbt"]
+nbt = []
 serde = ["dep:serde"]
 build = [
   "dep:heck",
@@ -37,7 +37,7 @@ rand = { version = "0.10", default-features = false, features = [
   "thread_rng",
 ] }
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-simdnbt = { version = "0.10", optional = true }
+simdnbt = "0.10"
 # Build dependencies
 heck = { version = "0.5.0", optional = true }
 proc-macro2 = { version = "1.0", optional = true }

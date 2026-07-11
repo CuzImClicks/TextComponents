@@ -39,6 +39,28 @@ pub trait TextResolutor {
     }
 }
 
+/// A resolver for component contents that may fail, such as selectors, scores,
+/// and NBT lookups performed by a command source.
+pub trait TryTextResolutor {
+    type Error;
+
+    fn try_resolve_other(&self, content: &Content) -> Result<TextComponent, Self::Error> {
+        Ok(TextComponent::from(content.clone()))
+    }
+
+    fn try_resolve_content(
+        &self,
+        resolvable: &Resolvable,
+        recursion_depth: usize,
+    ) -> Result<TextComponent, Self::Error>;
+
+    #[cfg(feature = "custom")]
+    fn try_resolve_custom(&self, data: &CustomData) -> Result<Option<TextComponent>, Self::Error> {
+        let _ = data;
+        Ok(None)
+    }
+}
+
 impl<T: TextResolutor> TextResolutor for Arc<T> {
     fn resolve_content(&self, resolvable: &Resolvable) -> TextComponent {
         (**self).resolve_content(resolvable)
@@ -55,6 +77,27 @@ impl<T: TextResolutor> TextResolutor for Arc<T> {
 
     fn split_translation(&self, text: String) -> Vec<(String, usize)> {
         (**self).split_translation(text)
+    }
+}
+
+impl<T: TryTextResolutor> TryTextResolutor for Arc<T> {
+    type Error = T::Error;
+
+    fn try_resolve_other(&self, content: &Content) -> Result<TextComponent, Self::Error> {
+        (**self).try_resolve_other(content)
+    }
+
+    fn try_resolve_content(
+        &self,
+        resolvable: &Resolvable,
+        recursion_depth: usize,
+    ) -> Result<TextComponent, Self::Error> {
+        (**self).try_resolve_content(resolvable, recursion_depth)
+    }
+
+    #[cfg(feature = "custom")]
+    fn try_resolve_custom(&self, data: &CustomData) -> Result<Option<TextComponent>, Self::Error> {
+        (**self).try_resolve_custom(data)
     }
 }
 
@@ -92,44 +135,120 @@ impl TextComponent {
     }
 
     pub fn resolve<R: TextResolutor + ?Sized>(&self, resolutor: &R) -> TextComponent {
-        let mut component = match &self.content {
-            #[cfg(feature = "custom")]
-            Content::Custom(data) => resolutor
-                .resolve_custom(data)
-                .unwrap_or(TextComponent::new()),
-            Content::Resolvable(resolvable) => resolutor.resolve_content(resolvable),
-            content => resolutor.resolve_other(content),
-        };
-
-        match &mut component.content {
-            Content::Translate(message) => {
-                message.args = message.args.as_ref().map(|args| {
-                    args.iter()
-                        .map(|arg| arg.resolve(resolutor))
-                        .collect::<Vec<TextComponent>>()
-                        .into_boxed_slice()
-                });
-            }
-            Content::Resolvable(Resolvable::Entity { separator, .. }) => {
-                **separator = separator.resolve(resolutor);
-            }
-            Content::Resolvable(Resolvable::NBT { separator, .. }) => {
-                **separator = separator.resolve(resolutor);
-            }
-            _ => (),
+        match self.try_resolve(&InfallibleResolver(resolutor)) {
+            Ok(component) => component,
+            Err(error) => match error {},
         }
+    }
+
+    pub fn try_resolve<R: TryTextResolutor + ?Sized>(
+        &self,
+        resolutor: &R,
+    ) -> Result<TextComponent, R::Error> {
+        self.try_resolve_at_depth(resolutor, 0)
+    }
+
+    /// Resolves content nested inside a resolver-provided value without
+    /// resetting vanilla's recursion-depth accounting.
+    pub fn try_resolve_from_depth<R: TryTextResolutor + ?Sized>(
+        &self,
+        resolutor: &R,
+        recursion_depth: usize,
+    ) -> Result<TextComponent, R::Error> {
+        self.try_resolve_at_depth(resolutor, recursion_depth)
+    }
+
+    fn try_resolve_at_depth<R: TryTextResolutor + ?Sized>(
+        &self,
+        resolutor: &R,
+        recursion_depth: usize,
+    ) -> Result<TextComponent, R::Error> {
+        if recursion_depth > 100 {
+            return Ok(self.clone());
+        }
+
+        let content_depth = recursion_depth + 1;
+        let mut component = match &self.content {
+            Content::Translate(message) => {
+                let mut message = message.clone();
+                message.args = match &message.args {
+                    Some(args) => Some(
+                        args.iter()
+                            .map(|arg| arg.try_resolve_at_depth(resolutor, content_depth))
+                            .collect::<Result<Vec<_>, _>>()?
+                            .into_boxed_slice(),
+                    ),
+                    None => None,
+                };
+                resolutor.try_resolve_other(&Content::Translate(message))?
+            }
+            Content::Object(object) => {
+                let mut object = object.clone();
+                let fallback = match &mut object {
+                    crate::content::Object::Atlas { fallback, .. }
+                    | crate::content::Object::Player { fallback, .. } => fallback,
+                };
+                if let Some(value) = fallback {
+                    **value = value.try_resolve_at_depth(resolutor, content_depth)?;
+                }
+                resolutor.try_resolve_other(&Content::Object(object))?
+            }
+            Content::Resolvable(resolvable) => {
+                let mut resolvable = resolvable.clone();
+                match &mut resolvable {
+                    Resolvable::Entity { separator, .. } | Resolvable::NBT { separator, .. } => {
+                        if let Some(value) = separator {
+                            **value = value.try_resolve_at_depth(resolutor, content_depth)?;
+                        }
+                    }
+                    Resolvable::Scoreboard { .. } => {}
+                }
+                resolutor.try_resolve_content(&resolvable, content_depth)?
+            }
+            #[cfg(feature = "custom")]
+            Content::Custom(data) => resolutor.try_resolve_custom(data)?.unwrap_or_default(),
+            content => resolutor.try_resolve_other(content)?,
+        };
 
         component.children.append(
             &mut self
                 .children
                 .iter()
-                .map(|child| child.resolve(resolutor))
-                .collect(),
+                .map(|child| child.try_resolve_at_depth(resolutor, recursion_depth + 1))
+                .collect::<Result<Vec<_>, _>>()?,
         );
-        self.interactions.mix(&mut component.interactions);
+        let mut interactions = self.interactions.clone();
+        if let Some(crate::interactivity::HoverEvent::ShowText { value }) = &mut interactions.hover
+        {
+            **value = value.try_resolve_at_depth(resolutor, recursion_depth + 1)?;
+        }
+        interactions.mix(&mut component.interactions);
         component.format = self.format.mix(&component.format);
 
-        component
+        Ok(component)
+    }
+}
+
+struct InfallibleResolver<'a, R: ?Sized>(&'a R);
+
+impl<R: TextResolutor + ?Sized> TryTextResolutor for InfallibleResolver<'_, R> {
+    type Error = std::convert::Infallible;
+
+    fn try_resolve_other(&self, content: &Content) -> Result<TextComponent, Self::Error> {
+        Ok(self.0.resolve_other(content))
+    }
+
+    fn try_resolve_content(
+        &self,
+        resolvable: &Resolvable,
+        _recursion_depth: usize,
+    ) -> Result<TextComponent, Self::Error> {
+        Ok(self.0.resolve_content(resolvable))
+    }
+
+    #[cfg(feature = "custom")]
+    fn try_resolve_custom(&self, data: &CustomData) -> Result<Option<TextComponent>, Self::Error> {
+        Ok(self.0.resolve_custom(data))
     }
 }
 

@@ -311,7 +311,7 @@ fn match_content(
                 } else {
                     compound.contents[3] = Some(Content::Resolvable(Resolvable::Entity {
                         selector: Cow::Owned(parse_string(first, chars)?),
-                        separator: Resolvable::entity_separator(),
+                        separator: None,
                     }));
                 }
                 return Ok(());
@@ -323,22 +323,23 @@ fn match_content(
                 if let Some(Content::Resolvable(Resolvable::Entity { separator, .. })) =
                     &mut compound.contents[3]
                 {
-                    **separator = parse_body(Some(first), chars)?;
+                    *separator = Some(Box::new(parse_body(Some(first), chars)?));
                 } else {
                     compound.contents[3] = Some(Content::Resolvable(Resolvable::Entity {
                         selector: Cow::Borrowed("-None-"),
-                        separator: Box::new(parse_body(Some(first), chars)?),
+                        separator: Some(Box::new(parse_body(Some(first), chars)?)),
                     }));
                 }
                 if let Some(Content::Resolvable(Resolvable::NBT { separator, .. })) =
                     &mut compound.contents[5]
                 {
-                    **separator = parse_body(Some(first), chars)?;
+                    *separator = Some(Box::new(parse_body(Some(first), chars)?));
                 } else {
                     compound.contents[5] = Some(Content::Resolvable(Resolvable::NBT {
                         path: Cow::Borrowed("-None-"),
-                        interpret: None,
-                        separator: Box::new(parse_body(Some(first), chars)?),
+                        interpret: false,
+                        plain: false,
+                        separator: Some(Box::new(parse_body(Some(first), chars)?)),
                         source: NbtSource::Block(Cow::Borrowed("")),
                     }));
                 }
@@ -374,8 +375,9 @@ fn match_content(
                 } else {
                     compound.contents[5] = Some(Content::Resolvable(Resolvable::NBT {
                         path: Cow::Owned(parse_string(first, chars)?),
-                        interpret: None,
-                        separator: Resolvable::nbt_separator(),
+                        interpret: false,
+                        plain: false,
+                        separator: None,
                         source: NbtSource::Block(Cow::Borrowed("")),
                     }));
                 }
@@ -387,12 +389,13 @@ fn match_content(
             if let Some(Content::Resolvable(Resolvable::NBT { interpret, .. })) =
                 &mut compound.contents[5]
             {
-                *interpret = Some(parse_bool(first, chars, "interpret")?);
+                *interpret = parse_bool(first, chars, "interpret")?;
             } else {
                 compound.contents[5] = Some(Content::Resolvable(Resolvable::NBT {
                     path: Cow::Borrowed("-None-"),
-                    interpret: Some(parse_bool(first, chars, "interpret")?),
-                    separator: Resolvable::nbt_separator(),
+                    interpret: parse_bool(first, chars, "interpret")?,
+                    plain: false,
+                    separator: None,
                     source: NbtSource::Block(Cow::Borrowed("")),
                 }));
             }
@@ -437,11 +440,12 @@ fn match_content(
                 if let Some(Content::Object(Object::Atlas { atlas, .. })) =
                     &mut compound.contents[6]
                 {
-                    *atlas = Some(Cow::Owned(parse_string(first, chars)?));
+                    *atlas = Cow::Owned(parse_string(first, chars)?);
                 } else {
                     compound.contents[6] = Some(Content::Object(Object::Atlas {
-                        atlas: Some(Cow::Owned(parse_string(first, chars)?)),
+                        atlas: Cow::Owned(parse_string(first, chars)?),
                         sprite: Cow::Borrowed("-None-"),
+                        fallback: None,
                     }));
                 }
                 return Ok(());
@@ -456,8 +460,9 @@ fn match_content(
                     *sprite = Cow::Owned(parse_string(first, chars)?);
                 } else {
                     compound.contents[6] = Some(Content::Object(Object::Atlas {
-                        atlas: None,
+                        atlas: Cow::Borrowed("minecraft:blocks"),
                         sprite: Cow::Owned(parse_string(first, chars)?),
+                        fallback: None,
                     }));
                 }
                 return Ok(());
@@ -474,6 +479,7 @@ fn match_content(
                     compound.contents[7] = Some(Content::Object(Object::Player {
                         player: parse_player(chars)?,
                         hat: true,
+                        fallback: None,
                     }));
                 }
                 return Ok(());
@@ -491,9 +497,13 @@ fn match_content(
                             name: None,
                             id: None,
                             texture: None,
+                            cape: None,
+                            elytra: None,
+                            model: None,
                             properties: vec![],
                         },
                         hat: parse_bool(first, chars, "hat")?,
+                        fallback: None,
                     }));
                 }
                 return Ok(());
@@ -583,6 +593,9 @@ fn parse_player(chars: &mut Peekable<Chars>) -> SnbtResult<ObjectPlayer> {
         name: None,
         id: None,
         texture: None,
+        cape: None,
+        elytra: None,
+        model: None,
         properties: vec![],
     };
     let mut name = String::new();
@@ -1020,24 +1033,24 @@ fn match_format(
                 }
                 if nums.len() == 4 {
                     let mut nums = nums.iter().enumerate();
-                    let mut num = 0;
+                    let mut num = 0_u32;
                     let (_, n) = nums.next_back().unwrap();
                     let Ok(n) = n.parse::<f32>() else {
                         return Err(SnbtError::WrongContentType(String::from("shadow_color")));
                     };
-                    num += (((n as u32) * 255) << 24) as i64;
+                    num += ((n * 255.0) as u32) << 24;
                     for (i, n) in nums {
                         let Ok(n) = n.parse::<f32>() else {
                             return Err(SnbtError::WrongContentType(String::from("shadow_color")));
                         };
-                        num += (((n as u32) * 255) << (24 - 8 * ((i + 1) % 3))) as i64;
+                        num += ((n * 255.0) as u32) << (16 - 8 * i);
                     }
-                    format.shadow_color = Some(num);
+                    format.shadow_color = Some(num as i32);
                     return Ok(());
                 };
                 return Err(SnbtError::WrongContentType(String::from("shadow_color")));
             }
-            format.shadow_color = Some(parse_num(first, chars, "shadow_color")?.as_i64());
+            format.shadow_color = Some(parse_num(first, chars, "shadow_color")?.as_i32());
             Ok(())
         }
         _ => {
@@ -1207,7 +1220,9 @@ fn parse_click(chars: &mut Peekable<Chars>) -> SnbtResult<ClickEvent> {
                                 }
                                 "dialog" => {
                                     events[6] = Some(ClickEvent::ShowDialog {
-                                        dialog: Cow::Owned(parse_string(next, chars)?),
+                                        dialog: crate::interactivity::Dialog::Reference(
+                                            Cow::Owned(parse_string(next, chars)?),
+                                        ),
                                     })
                                 }
                                 #[cfg(feature = "custom")]
@@ -1329,7 +1344,7 @@ fn parse_hover(chars: &mut Peekable<Chars>) -> SnbtResult<HoverEvent> {
                                     _ => {
                                         events[1] = Some(HoverEvent::ShowItem {
                                             id: new_id.clone(),
-                                            count: None,
+                                            count: 1,
                                             components: None,
                                         })
                                     }
@@ -1351,12 +1366,12 @@ fn parse_hover(chars: &mut Peekable<Chars>) -> SnbtResult<HoverEvent> {
                         },
                         "count" => match &mut events[1] {
                             Some(HoverEvent::ShowItem { count, .. }) => {
-                                *count = Some(parse_num(next, chars, "id")?.as_i32());
+                                *count = parse_num(next, chars, "id")?.as_i32();
                             }
                             _ => {
                                 events[1] = Some(HoverEvent::ShowItem {
                                     id: Cow::Borrowed("-None-"),
-                                    count: Some(parse_num(next, chars, "id")?.as_i32()),
+                                    count: parse_num(next, chars, "id")?.as_i32(),
                                     components: None,
                                 })
                             }
@@ -1364,13 +1379,21 @@ fn parse_hover(chars: &mut Peekable<Chars>) -> SnbtResult<HoverEvent> {
                         "components" => match next {
                             '\'' | '"' => match &mut events[1] {
                                 Some(HoverEvent::ShowItem { components, .. }) => {
-                                    *components = Some(Cow::Owned(parse_string(next, chars)?));
+                                    *components = Some(crate::NbtValue::from(
+                                        simdnbt::owned::NbtTag::String(
+                                            parse_string(next, chars)?.into(),
+                                        ),
+                                    ));
                                 }
                                 _ => {
                                     events[1] = Some(HoverEvent::ShowItem {
                                         id: Cow::Borrowed("-None-"),
-                                        count: None,
-                                        components: Some(Cow::Owned(parse_string(next, chars)?)),
+                                        count: 1,
+                                        components: Some(crate::NbtValue::from(
+                                            simdnbt::owned::NbtTag::String(
+                                                parse_string(next, chars)?.into(),
+                                            ),
+                                        )),
                                     })
                                 }
                             },
@@ -1513,16 +1536,6 @@ impl Num {
             Num::I64(n) => *n as i32,
             Num::F32(n) => *n as i32,
             Num::F64(n) => *n as i32,
-        }
-    }
-    pub fn as_i64(&self) -> i64 {
-        match self {
-            Num::I8(n) => *n as i64,
-            Num::I16(n) => *n as i64,
-            Num::I32(n) => *n as i64,
-            Num::I64(n) => *n,
-            Num::F32(n) => *n as i64,
-            Num::F64(n) => *n as i64,
         }
     }
 }

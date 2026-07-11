@@ -2,9 +2,9 @@
 use crate::custom::Payload;
 use crate::{
     Modifier, TextComponent,
-    content::{Content, Object},
+    content::{Content, NbtSource, Object, PlayerModel, Resolvable},
     format::{Color, Format},
-    interactivity::{ClickEvent, HoverEvent, Interactivity},
+    interactivity::{ClickEvent, Dialog, HoverEvent, Interactivity},
     resolving::{BuildTarget, NoResolutor, TextResolutor},
 };
 use simdnbt::{
@@ -12,6 +12,8 @@ use simdnbt::{
     owned::{BaseNbt, Nbt, NbtCompound, NbtList, NbtTag},
 };
 use std::ops::Deref as _;
+
+pub use crate::parse::nbt::ComponentDecodeError;
 
 pub struct NbtBuilder;
 
@@ -22,6 +24,16 @@ impl BuildTarget for NbtBuilder {
         resolutor: &R,
         component: &TextComponent,
     ) -> NbtTag {
+        NbtTag::Compound(self.build_compound(resolutor, component))
+    }
+}
+
+impl NbtBuilder {
+    fn build_compound<R: TextResolutor + ?Sized>(
+        &self,
+        resolutor: &R,
+        component: &TextComponent,
+    ) -> NbtCompound {
         let mut items = vec![];
         component.content.to_compound(&mut items, self, resolutor);
         component.format.to_compound(&mut items);
@@ -33,16 +45,12 @@ impl BuildTarget for NbtBuilder {
                     component
                         .children
                         .iter()
-                        .map(|nbt| {
-                            self.build_component(resolutor, nbt)
-                                .into_compound()
-                                .unwrap()
-                        })
+                        .map(|nbt| self.build_compound(resolutor, nbt))
                         .collect(),
                 )),
             ));
         }
-        NbtTag::Compound(NbtCompound::from_values(items))
+        NbtCompound::from_values(items)
     }
 }
 
@@ -273,14 +281,27 @@ impl Content {
     ) {
         match self {
             Content::Text { text } => compound.push(("text".into(), text.to_nbt_tag())),
-            Content::Object(Object::Atlas { atlas, sprite }) => {
-                if let Some(atlas) = atlas {
+            Content::Object(Object::Atlas {
+                atlas,
+                sprite,
+                fallback,
+            }) => {
+                if atlas != "minecraft:blocks" {
                     compound.push(("atlas".into(), atlas.to_nbt_tag()));
                 }
                 compound.push(("sprite".into(), sprite.to_nbt_tag()));
+                if let Some(fallback) = fallback {
+                    compound.push((
+                        "fallback".into(),
+                        NbtTag::Compound(target.build_compound(resolutor, fallback)),
+                    ));
+                }
             }
-            Content::Object(Object::Player { player, hat }) => {
-                compound.push(("object".into(), "player".into()));
+            Content::Object(Object::Player {
+                player,
+                hat,
+                fallback,
+            }) => {
                 let mut inner = vec![];
                 if let Some(id) = &player.id {
                     inner.push(("id".into(), NbtTag::IntArray(id.to_vec())));
@@ -290,6 +311,24 @@ impl Content {
                 }
                 if let Some(texture) = &player.texture {
                     inner.push(("texture".into(), texture.to_nbt_tag()));
+                }
+                if let Some(cape) = &player.cape {
+                    inner.push(("cape".into(), cape.to_nbt_tag()));
+                }
+                if let Some(elytra) = &player.elytra {
+                    inner.push(("elytra".into(), elytra.to_nbt_tag()));
+                }
+                if let Some(model) = player.model {
+                    inner.push((
+                        "model".into(),
+                        NbtTag::String(
+                            match model {
+                                PlayerModel::Slim => "slim",
+                                PlayerModel::Wide => "wide",
+                            }
+                            .into(),
+                        ),
+                    ));
                 }
                 if !player.properties.is_empty() {
                     inner.push((
@@ -319,6 +358,12 @@ impl Content {
                 if !hat {
                     compound.push(("hat".into(), NbtTag::Byte(0)));
                 }
+                if let Some(fallback) = fallback {
+                    compound.push((
+                        "fallback".into(),
+                        NbtTag::Compound(target.build_compound(resolutor, fallback)),
+                    ));
+                }
             }
             Content::Keybind { keybind } => compound.push(("keybind".into(), keybind.to_nbt_tag())),
             Content::Translate(msg) => {
@@ -331,18 +376,74 @@ impl Content {
                         "with".into(),
                         NbtTag::List(NbtList::Compound(
                             args.iter()
-                                .map(|nbt| {
-                                    target
-                                        .build_component(resolutor, nbt)
-                                        .into_compound()
-                                        .unwrap()
-                                })
+                                .map(|nbt| target.build_compound(resolutor, nbt))
                                 .collect(),
                         )),
                     ))
                 }
             }
-            _ => (),
+            Content::Resolvable(Resolvable::Scoreboard {
+                selector,
+                objective,
+            }) => {
+                compound.push((
+                    "score".into(),
+                    NbtTag::Compound(NbtCompound::from_values(vec![
+                        ("name".into(), selector.to_nbt_tag()),
+                        ("objective".into(), objective.to_nbt_tag()),
+                    ])),
+                ));
+            }
+            Content::Resolvable(Resolvable::Entity {
+                selector,
+                separator,
+            }) => {
+                compound.push(("selector".into(), selector.to_nbt_tag()));
+                if let Some(separator) = separator {
+                    compound.push((
+                        "separator".into(),
+                        NbtTag::Compound(target.build_compound(resolutor, separator)),
+                    ));
+                }
+            }
+            Content::Resolvable(Resolvable::NBT {
+                path,
+                interpret,
+                plain,
+                separator,
+                source,
+            }) => {
+                compound.push(("nbt".into(), path.to_nbt_tag()));
+                if *interpret {
+                    compound.push(("interpret".into(), NbtTag::Byte(1)));
+                }
+                if *plain {
+                    compound.push(("plain".into(), NbtTag::Byte(1)));
+                }
+                if let Some(separator) = separator {
+                    compound.push((
+                        "separator".into(),
+                        NbtTag::Compound(target.build_compound(resolutor, separator)),
+                    ));
+                }
+                let (field, value) = match source {
+                    NbtSource::Entity(value) => ("entity", value),
+                    NbtSource::Block(value) => ("block", value),
+                    NbtSource::Storage(value) => ("storage", value),
+                };
+                compound.push((field.into(), value.to_nbt_tag()));
+            }
+            #[cfg(feature = "custom")]
+            Content::Custom(data) => {
+                let mut custom = vec![("id".into(), data.id.to_nbt_tag())];
+                if let Payload::Nbt(payload) = &data.payload {
+                    custom.push(("payload".into(), payload.to_nbt_tag()));
+                }
+                compound.push((
+                    "custom".into(),
+                    NbtTag::Compound(NbtCompound::from_values(custom)),
+                ));
+            }
         };
     }
 }
@@ -394,7 +495,7 @@ impl Format {
             compound.push(("obfuscated".into(), NbtTag::Byte(value as i8)));
         }
         if let Some(color) = self.shadow_color {
-            compound.push(("shadow_color".into(), NbtTag::Long(color)));
+            compound.push(("shadow_color".into(), NbtTag::Int(color)));
         }
     }
 }
@@ -436,10 +537,12 @@ impl HoverEvent {
                     ("action".into(), NbtTag::String("show_item".into())),
                     ("id".into(), id.to_nbt_tag()),
                 ];
-                if let Some(count) = count {
+                if *count != 1 {
                     compound.push(("count".into(), NbtTag::Int(*count)));
                 }
-                if let Some(components) = components {
+                if let Some(components) = components
+                    && !components.is_empty_compound()
+                {
                     compound.push(("components".into(), components.to_nbt_tag()));
                 }
                 NbtTag::Compound(NbtCompound::from_values(compound))
@@ -455,7 +558,7 @@ impl HoverEvent {
                 let mut compound = vec![
                     ("action".into(), NbtTag::String("show_entity".into())),
                     ("id".into(), id.to_nbt_tag()),
-                    ("uuid".into(), NbtTag::List(NbtList::Int(uuid))),
+                    ("uuid".into(), NbtTag::IntArray(uuid)),
                 ];
                 if let Some(name) = name {
                     compound.push(("name".into(), name.build(resolutor, NbtBuilder)));
@@ -492,14 +595,20 @@ impl ClickEvent {
             }
             ClickEvent::ShowDialog { dialog } => {
                 values.push(("action".into(), "show_dialog".into()));
-                values.push(("dialog".into(), dialog.to_nbt_tag()));
+                values.push((
+                    "dialog".into(),
+                    match dialog {
+                        Dialog::Reference(reference) => reference.to_nbt_tag(),
+                        Dialog::Inline(value) => value.to_nbt_tag(),
+                    },
+                ));
             }
             #[cfg(feature = "custom")]
             ClickEvent::Custom(data) => {
                 values.push(("action".into(), "custom".into()));
                 values.push(("id".into(), data.id.to_nbt_tag()));
-                if !data.payload.is_empty() {
-                    values.push(("payload".into(), data.payload.to_nbt_tag()));
+                if let Payload::Nbt(payload) = &data.payload {
+                    values.push(("payload".into(), payload.to_nbt_tag()));
                 }
             }
         };
@@ -520,12 +629,5 @@ impl ToNbtTag for &TextComponent {
 impl FromNbtTag for TextComponent {
     fn from_nbt_tag(tag: simdnbt::borrow::NbtTag) -> Option<Self> {
         TextComponent::from_nbt(&tag.to_owned())
-    }
-}
-
-#[cfg(feature = "custom")]
-impl Payload {
-    fn to_nbt_tag(&self) -> NbtTag {
-        NbtTag::Byte(1)
     }
 }

@@ -43,7 +43,7 @@ pub struct Format {
         feature = "serde",
         serde(skip_serializing_if = "Option::is_none", default)
     )]
-    pub shadow_color: Option<i64>,
+    pub shadow_color: Option<i32>,
 }
 
 impl Default for Format {
@@ -112,8 +112,8 @@ impl Format {
         self.shadow_color = Some(Self::parse_shadow_color(a, r, g, b));
         self
     }
-    pub fn parse_shadow_color(a: u8, r: u8, g: u8, b: u8) -> i64 {
-        (((a as u32) << 24) + ((r as u32) << 16) + ((g as u32) << 8) + (b as u32)) as i64
+    pub fn parse_shadow_color(a: u8, r: u8, g: u8, b: u8) -> i32 {
+        (((a as u32) << 24) + ((r as u32) << 16) + ((g as u32) << 8) + (b as u32)) as i32
     }
     pub fn reset(mut self) -> Self {
         self.color = Some(Color::White);

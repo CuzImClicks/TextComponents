@@ -34,14 +34,20 @@ impl From<String> for Content {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
 pub enum Object {
     Atlas {
         #[cfg_attr(
             feature = "serde",
+            serde(skip_serializing_if = "is_default_atlas", default = "default_atlas")
+        )]
+        atlas: Cow<'static, str>,
+        sprite: Cow<'static, str>,
+        #[cfg_attr(
+            feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        atlas: Option<Cow<'static, str>>,
-        sprite: Cow<'static, str>,
+        fallback: Option<Box<TextComponent>>,
     },
     Player {
         player: ObjectPlayer,
@@ -50,6 +56,11 @@ pub enum Object {
             serde(skip_serializing_if = "Clone::clone", default)
         )]
         hat: bool,
+        #[cfg_attr(
+            feature = "serde",
+            serde(skip_serializing_if = "Option::is_none", default)
+        )]
+        fallback: Option<Box<TextComponent>>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -72,6 +83,21 @@ pub struct ObjectPlayer {
     pub texture: Option<Cow<'static, str>>,
     #[cfg_attr(
         feature = "serde",
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
+    pub cape: Option<Cow<'static, str>>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
+    pub elytra: Option<Cow<'static, str>>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "Option::is_none", default)
+    )]
+    pub model: Option<PlayerModel>,
+    #[cfg_attr(
+        feature = "serde",
         serde(skip_serializing_if = "Vec::is_empty", default)
     )]
     pub properties: Vec<PlayerProperties>,
@@ -83,6 +109,9 @@ impl ObjectPlayer {
             name: Some(name.into()),
             id: None,
             texture: None,
+            cape: None,
+            elytra: None,
+            model: None,
             properties: vec![],
         }
     }
@@ -92,6 +121,9 @@ impl ObjectPlayer {
             name: None,
             id: Some(id),
             texture: None,
+            cape: None,
+            elytra: None,
+            model: None,
             properties: vec![],
         }
     }
@@ -101,6 +133,9 @@ impl ObjectPlayer {
             name: None,
             id: None,
             texture: Some(path.into()),
+            cape: None,
+            elytra: None,
+            model: None,
             properties: vec![],
         }
     }
@@ -115,6 +150,9 @@ impl ObjectPlayer {
             name: None,
             id: None,
             texture: None,
+            cape: None,
+            elytra: None,
+            model: None,
             properties: vec![PlayerProperties {
                 name: Cow::Borrowed("textures"),
                 value: value.into(),
@@ -126,8 +164,19 @@ impl ObjectPlayer {
         self.name.is_none()
             && self.id.is_none()
             && self.texture.is_none()
+            && self.cape.is_none()
+            && self.elytra.is_none()
+            && self.model.is_none()
             && self.properties.is_empty()
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum PlayerModel {
+    Slim,
+    Wide,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -153,26 +202,46 @@ pub enum Resolvable {
     #[cfg_attr(feature = "serde", serde(untagged))]
     Entity {
         selector: Cow<'static, str>,
-        #[cfg_attr(feature = "serde", serde(default = "Resolvable::entity_separator"))]
-        separator: Box<TextComponent>,
+        #[cfg_attr(
+            feature = "serde",
+            serde(skip_serializing_if = "Option::is_none", default)
+        )]
+        separator: Option<Box<TextComponent>>,
     },
     /// #### Needs [resolution](TextComponent::resolve)
     #[cfg_attr(feature = "serde", serde(untagged))]
     NBT {
         #[cfg_attr(feature = "serde", serde(rename = "nbt"))]
         path: Cow<'static, str>,
-        // This meants to represent that this component should be
-        // replaced with the one inside the nbt selected if possible
+        /// Whether selected NBT values should be decoded as components.
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_false", default))]
+        interpret: bool,
+        /// Whether non-interpreted NBT should omit rich type styling.
+        #[cfg_attr(feature = "serde", serde(skip_serializing_if = "is_false", default))]
+        plain: bool,
         #[cfg_attr(
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        interpret: Option<bool>,
-        #[cfg_attr(feature = "serde", serde(default = "Resolvable::nbt_separator"))]
-        separator: Box<TextComponent>,
+        separator: Option<Box<TextComponent>>,
         #[cfg_attr(feature = "serde", serde(flatten, default = "NbtSource::Entity"))]
         source: NbtSource,
     },
+}
+
+#[cfg(feature = "serde")]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+#[cfg(feature = "serde")]
+fn default_atlas() -> Cow<'static, str> {
+    Cow::Borrowed("minecraft:blocks")
+}
+
+#[cfg(feature = "serde")]
+fn is_default_atlas(value: &str) -> bool {
+    value == "minecraft:blocks"
 }
 impl Resolvable {
     pub fn entity_separator() -> Box<TextComponent> {
@@ -246,6 +315,7 @@ impl From<ObjectPlayer> for TextComponent {
             content: Content::Object(Object::Player {
                 player: value,
                 hat: true,
+                fallback: None,
             }),
             children: Vec::new(),
             format: Format::new(),

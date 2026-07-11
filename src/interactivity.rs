@@ -1,8 +1,8 @@
 use uuid::Uuid;
 
-use crate::TextComponent;
 #[cfg(feature = "custom")]
 use crate::custom::CustomData;
+use crate::{NbtValue, TextComponent};
 use std::borrow::Cow;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -83,7 +83,7 @@ pub enum ClickEvent {
         value: Cow<'static, str>,
     },
     ShowDialog {
-        dialog: Cow<'static, str>,
+        dialog: Dialog,
     },
     #[cfg(feature = "custom")]
     Custom(CustomData),
@@ -119,9 +119,17 @@ impl ClickEvent {
     /// * `dialog` - Either a dialog id or a dialog definition
     pub fn show_dialog<T: Into<Cow<'static, str>>>(dialog: T) -> Self {
         ClickEvent::ShowDialog {
-            dialog: dialog.into(),
+            dialog: Dialog::Reference(dialog.into()),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(untagged))]
+pub enum Dialog {
+    Reference(Cow<'static, str>),
+    Inline(NbtValue),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -135,14 +143,14 @@ pub enum HoverEvent {
         id: Cow<'static, str>,
         #[cfg_attr(
             feature = "serde",
-            serde(skip_serializing_if = "Option::is_none", default)
+            serde(skip_serializing_if = "is_one", default = "one")
         )]
-        count: Option<i32>,
+        count: i32,
         #[cfg_attr(
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        components: Option<Cow<'static, str>>,
+        components: Option<NbtValue>,
     },
     ShowEntity {
         #[cfg_attr(
@@ -164,16 +172,16 @@ impl HoverEvent {
     /// Creates a [HoverEvent] that will show an item.
     /// * `id` - The id of the item
     /// * `count` - If [Some] shows the amount of items
-    /// * `components` - An optional stringified version of the item's components
-    pub fn show_item<T: Into<Cow<'static, str>>, R: Into<Cow<'static, str>>>(
+    /// * `components` - An optional data component patch
+    pub fn show_item<T: Into<Cow<'static, str>>>(
         id: T,
         count: Option<i32>,
-        components: Option<R>,
+        components: Option<NbtValue>,
     ) -> Self {
         HoverEvent::ShowItem {
             id: id.into(),
-            count,
-            components: components.map(Into::into),
+            count: count.unwrap_or(1),
+            components: components.filter(|value| !value.is_empty_compound()),
         }
     }
     /// Creates a [HoverEvent] that will show an entity.
@@ -191,4 +199,14 @@ impl HoverEvent {
             uuid,
         }
     }
+}
+
+#[cfg(feature = "serde")]
+const fn one() -> i32 {
+    1
+}
+
+#[cfg(feature = "serde")]
+const fn is_one(value: &i32) -> bool {
+    *value == 1
 }
