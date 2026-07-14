@@ -13,6 +13,7 @@ pub mod build;
 pub mod content;
 #[cfg(feature = "custom")]
 pub mod custom;
+mod encoded_nbt;
 pub mod fmt;
 pub mod format;
 pub mod interactivity;
@@ -23,6 +24,7 @@ pub mod parse;
 pub mod resolving;
 pub mod translation;
 
+pub use encoded_nbt::{EmbeddedNbtCodec, EncodedNbt};
 pub use nbt_value::NbtValue;
 
 /// A recursive rich text format with interaction capabilities.

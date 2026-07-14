@@ -3,7 +3,7 @@ use std::{borrow::Cow, error::Error, fmt::Display};
 #[cfg(feature = "custom")]
 use crate::custom::{CustomData, Payload};
 use crate::{
-    NbtValue, TextComponent,
+    EncodedNbt, TextComponent,
     content::{
         Content, NbtSource, Object, ObjectPlayer, PlayerModel, PlayerProperties, Resolvable,
     },
@@ -483,7 +483,9 @@ impl ClickEvent {
                         }
                         Dialog::Reference(value.into())
                     }
-                    NbtTag::Compound(_) => Dialog::Inline(dialog.clone().into()),
+                    NbtTag::Compound(_) => {
+                        Dialog::Inline(EncodedNbt::from_codec_output(dialog.clone()))
+                    }
                     _ => return Err(invalid("dialog", "a dialog identifier or definition")),
                 };
                 Ok(Self::ShowDialog { dialog })
@@ -520,9 +522,9 @@ impl HoverEvent {
                 let components = match compound.get("components") {
                     None => None,
                     Some(NbtTag::Compound(components)) if components.is_empty() => None,
-                    Some(NbtTag::Compound(components)) => {
-                        Some(NbtValue::from(NbtTag::Compound(components.clone())))
-                    }
+                    Some(NbtTag::Compound(components)) => Some(EncodedNbt::from_codec_output(
+                        NbtTag::Compound(components.clone()),
+                    )),
                     Some(_) => return Err(invalid("components", "a data component patch")),
                 };
                 Ok(Self::ShowItem {

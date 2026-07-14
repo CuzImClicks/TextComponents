@@ -24,6 +24,13 @@ impl BuildTarget for NbtBuilder {
         resolutor: &R,
         component: &TextComponent,
     ) -> NbtTag {
+        if let Content::Text { text } = &component.content
+            && component.children.is_empty()
+            && component.format.is_none()
+            && component.interactions.is_none()
+        {
+            return NbtTag::String(text.as_ref().into());
+        }
         NbtTag::Compound(self.build_compound(resolutor, component))
     }
 }
@@ -41,12 +48,12 @@ impl NbtBuilder {
         if !component.children.is_empty() {
             items.push((
                 "extra".into(),
-                NbtTag::List(NbtList::Compound(
+                NbtTag::List(NbtList::from(
                     component
                         .children
                         .iter()
-                        .map(|nbt| self.build_compound(resolutor, nbt))
-                        .collect(),
+                        .map(|component| self.build_component(resolutor, component))
+                        .collect::<Vec<_>>(),
                 )),
             ));
         }
@@ -55,6 +62,11 @@ impl NbtBuilder {
 }
 
 impl TextComponent {
+    /// Encodes this component through Vanilla's recursive component codec.
+    pub fn to_codec_nbt(&self) -> NbtTag {
+        NbtBuilder.build_component(&NoResolutor, self)
+    }
+
     pub fn nbt_display<T: Into<NbtTag>>(tag: T) -> Self {
         let tag = tag.into();
         match tag {
@@ -293,7 +305,7 @@ impl Content {
                 if let Some(fallback) = fallback {
                     compound.push((
                         "fallback".into(),
-                        NbtTag::Compound(target.build_compound(resolutor, fallback)),
+                        target.build_component(resolutor, fallback),
                     ));
                 }
             }
@@ -361,7 +373,7 @@ impl Content {
                 if let Some(fallback) = fallback {
                     compound.push((
                         "fallback".into(),
-                        NbtTag::Compound(target.build_compound(resolutor, fallback)),
+                        target.build_component(resolutor, fallback),
                     ));
                 }
             }
@@ -374,10 +386,10 @@ impl Content {
                 if let Some(args) = &msg.args {
                     compound.push((
                         "with".into(),
-                        NbtTag::List(NbtList::Compound(
+                        NbtTag::List(NbtList::from(
                             args.iter()
-                                .map(|nbt| target.build_compound(resolutor, nbt))
-                                .collect(),
+                                .map(|component| target.build_component(resolutor, component))
+                                .collect::<Vec<_>>(),
                         )),
                     ))
                 }
@@ -402,7 +414,7 @@ impl Content {
                 if let Some(separator) = separator {
                     compound.push((
                         "separator".into(),
-                        NbtTag::Compound(target.build_compound(resolutor, separator)),
+                        target.build_component(resolutor, separator),
                     ));
                 }
             }
@@ -423,7 +435,7 @@ impl Content {
                 if let Some(separator) = separator {
                     compound.push((
                         "separator".into(),
-                        NbtTag::Compound(target.build_compound(resolutor, separator)),
+                        target.build_component(resolutor, separator),
                     ));
                 }
                 let (field, value) = match source {
@@ -470,9 +482,7 @@ impl Format {
                     Color::LightPurple => NbtTag::String("light_purple".into()),
                     Color::Yellow => NbtTag::String("yellow".into()),
                     Color::White => NbtTag::String("white".into()),
-                    Color::Rgb(r, g, b) => {
-                        NbtTag::String(format!("#{:02x}{:02x}{:02x}", r, g, b).into())
-                    }
+                    Color::Rgb(r, g, b) => NbtTag::String(format!("#{r:02X}{g:02X}{b:02X}").into()),
                 },
             ));
         }
@@ -526,7 +536,7 @@ impl HoverEvent {
         match self {
             HoverEvent::ShowText { value } => NbtTag::Compound(NbtCompound::from_values(vec![
                 ("action".into(), NbtTag::String("show_text".into())),
-                ("value".into(), value.build(resolutor, NbtBuilder)),
+                ("value".into(), NbtBuilder.build_component(resolutor, value)),
             ])),
             HoverEvent::ShowItem {
                 id,
@@ -543,7 +553,7 @@ impl HoverEvent {
                 if let Some(components) = components
                     && !components.is_empty_compound()
                 {
-                    compound.push(("components".into(), components.to_nbt_tag()));
+                    compound.push(("components".into(), components.as_nbt().clone()));
                 }
                 NbtTag::Compound(NbtCompound::from_values(compound))
             }
@@ -561,7 +571,7 @@ impl HoverEvent {
                     ("uuid".into(), NbtTag::IntArray(uuid)),
                 ];
                 if let Some(name) = name {
-                    compound.push(("name".into(), name.build(resolutor, NbtBuilder)));
+                    compound.push(("name".into(), NbtBuilder.build_component(resolutor, name)));
                 }
                 NbtTag::Compound(NbtCompound::from_values(compound))
             }
@@ -599,7 +609,7 @@ impl ClickEvent {
                     "dialog".into(),
                     match dialog {
                         Dialog::Reference(reference) => reference.to_nbt_tag(),
-                        Dialog::Inline(value) => value.to_nbt_tag(),
+                        Dialog::Inline(value) => value.as_nbt().clone(),
                     },
                 ));
             }
@@ -618,12 +628,12 @@ impl ClickEvent {
 
 impl ToNbtTag for TextComponent {
     fn to_nbt_tag(self) -> NbtTag {
-        NbtBuilder.build_component(&NoResolutor, &self)
+        self.to_codec_nbt()
     }
 }
 impl ToNbtTag for &TextComponent {
     fn to_nbt_tag(self) -> NbtTag {
-        NbtBuilder.build_component(&NoResolutor, self)
+        self.to_codec_nbt()
     }
 }
 impl FromNbtTag for TextComponent {

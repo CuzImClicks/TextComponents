@@ -2,7 +2,7 @@ use uuid::Uuid;
 
 #[cfg(feature = "custom")]
 use crate::custom::CustomData;
-use crate::{NbtValue, TextComponent};
+use crate::{EncodedNbt, TextComponent};
 use std::borrow::Cow;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -129,7 +129,7 @@ impl ClickEvent {
 #[cfg_attr(feature = "serde", serde(untagged))]
 pub enum Dialog {
     Reference(Cow<'static, str>),
-    Inline(NbtValue),
+    Inline(EncodedNbt),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -150,7 +150,7 @@ pub enum HoverEvent {
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        components: Option<NbtValue>,
+        components: Option<EncodedNbt>,
     },
     ShowEntity {
         #[cfg_attr(
@@ -176,7 +176,7 @@ impl HoverEvent {
     pub fn show_item<T: Into<Cow<'static, str>>>(
         id: T,
         count: Option<i32>,
-        components: Option<NbtValue>,
+        components: Option<EncodedNbt>,
     ) -> Self {
         HoverEvent::ShowItem {
             id: id.into(),

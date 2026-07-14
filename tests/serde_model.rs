@@ -2,11 +2,29 @@
 
 use serde_json::json;
 use simdnbt::owned::{NbtCompound, NbtTag};
+use std::convert::Infallible;
 use text_components::{
-    NbtValue, TextComponent,
+    EmbeddedNbtCodec, EncodedNbt, TextComponent,
     content::{NbtSource, Object},
     interactivity::{ClickEvent, Dialog, HoverEvent},
 };
+
+struct CodecOutput(NbtTag);
+
+impl EmbeddedNbtCodec for CodecOutput {
+    type Error = Infallible;
+
+    fn encode_embedded_nbt(self) -> Result<NbtTag, Self::Error> {
+        Ok(self.0)
+    }
+}
+
+fn encoded(value: NbtTag) -> EncodedNbt {
+    match EncodedNbt::encode(CodecOutput(value)) {
+        Ok(value) => value,
+        Err(error) => match error {},
+    }
+}
 
 #[test]
 fn content_variants_use_minecrafts_json_shapes() {
@@ -51,7 +69,7 @@ fn interaction_variants_use_minecrafts_json_shapes() {
     component.interactions.hover = Some(HoverEvent::ShowItem {
         id: "minecraft:stone".into(),
         count: 1,
-        components: Some(NbtValue::from(NbtTag::Compound(patch))),
+        components: Some(encoded(NbtTag::Compound(patch))),
     });
     let expected = json!({
         "text": "events",

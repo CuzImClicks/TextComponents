@@ -1379,7 +1379,7 @@ fn parse_hover(chars: &mut Peekable<Chars>) -> SnbtResult<HoverEvent> {
                         "components" => match next {
                             '\'' | '"' => match &mut events[1] {
                                 Some(HoverEvent::ShowItem { components, .. }) => {
-                                    *components = Some(crate::NbtValue::from(
+                                    *components = Some(crate::EncodedNbt::from_codec_output(
                                         simdnbt::owned::NbtTag::String(
                                             parse_string(next, chars)?.into(),
                                         ),
@@ -1389,7 +1389,7 @@ fn parse_hover(chars: &mut Peekable<Chars>) -> SnbtResult<HoverEvent> {
                                     events[1] = Some(HoverEvent::ShowItem {
                                         id: Cow::Borrowed("-None-"),
                                         count: 1,
-                                        components: Some(crate::NbtValue::from(
+                                        components: Some(crate::EncodedNbt::from_codec_output(
                                             simdnbt::owned::NbtTag::String(
                                                 parse_string(next, chars)?.into(),
                                             ),

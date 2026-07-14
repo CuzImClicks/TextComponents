@@ -5,22 +5,41 @@ use simdnbt::{
     owned::{NbtCompound, NbtList, NbtTag},
 };
 use std::{
+    borrow::Cow,
     collections::hash_map::DefaultHasher,
+    convert::Infallible,
     hash::{Hash, Hasher},
 };
-#[cfg(feature = "custom")]
 use text_components::{
-    Modifier,
-    custom::{CustomData, Payload},
-    interactivity::HoverEvent,
-};
-use text_components::{
-    NbtValue, TextComponent,
+    EmbeddedNbtCodec, EncodedNbt, Modifier, NbtValue, TextComponent,
     content::{Content, NbtSource, Object, Resolvable},
     format::Color,
     interactivity::{ClickEvent, Dialog},
     nbt::ComponentDecodeError,
+    translation::TranslatedMessage,
 };
+#[cfg(feature = "custom")]
+use text_components::{
+    custom::{CustomData, Payload},
+    interactivity::HoverEvent,
+};
+
+struct CodecOutput(NbtTag);
+
+impl EmbeddedNbtCodec for CodecOutput {
+    type Error = Infallible;
+
+    fn encode_embedded_nbt(self) -> Result<NbtTag, Self::Error> {
+        Ok(self.0)
+    }
+}
+
+fn encoded(value: NbtTag) -> EncodedNbt {
+    match EncodedNbt::encode(CodecOutput(value)) {
+        Ok(value) => value,
+        Err(error) => match error {},
+    }
+}
 
 fn compound(values: Vec<(&str, NbtTag)>) -> NbtTag {
     NbtTag::Compound(NbtCompound::from_values(
@@ -46,6 +65,10 @@ fn accepts_empty_string_and_non_empty_list_roots() {
     assert_eq!(
         TextComponent::try_from_nbt(&NbtTag::List(NbtList::Empty)),
         Err(ComponentDecodeError::EmptyComponentList)
+    );
+    assert_eq!(
+        TextComponent::plain("plain").to_codec_nbt(),
+        NbtTag::String("plain".into())
     );
 }
 
@@ -173,7 +196,7 @@ fn arbitrary_event_payloads_round_trip_without_losing_nbt_types() {
         .hover_event(HoverEvent::ShowItem {
             id: "minecraft:stone".into(),
             count: 2,
-            components: Some(NbtValue::from(payload)),
+            components: Some(encoded(payload)),
         });
 
     let encoded = (&component).to_nbt_tag();
@@ -230,6 +253,78 @@ fn resolvable_content_round_trips() {
 }
 
 #[test]
+fn component_codec_collapses_plain_components_recursively() {
+    let component = TextComponent::translated(TranslatedMessage {
+        key: Cow::Borrowed("test.message"),
+        fallback: None,
+        args: Some(Box::new([TextComponent::plain("argument")])),
+    })
+    .add_child(TextComponent::plain("child"))
+    .hover_event(text_components::interactivity::HoverEvent::show_text(
+        "hover",
+    ));
+
+    let NbtTag::Compound(encoded) = component.to_codec_nbt() else {
+        panic!("styled component should encode as a compound");
+    };
+    assert_eq!(
+        encoded.get("with"),
+        Some(&NbtTag::List(NbtList::String(vec!["argument".into()])))
+    );
+    assert_eq!(
+        encoded.get("extra"),
+        Some(&NbtTag::List(NbtList::String(vec!["child".into()])))
+    );
+    let hover = encoded
+        .get("hover_event")
+        .and_then(NbtTag::compound)
+        .expect("hover event should encode as a compound");
+    assert_eq!(hover.get("value"), Some(&NbtTag::String("hover".into())));
+}
+
+#[test]
+fn nested_hover_components_are_encoded_without_resolving_them() {
+    let component = TextComponent::plain("hover").hover_event(
+        text_components::interactivity::HoverEvent::show_text(TextComponent::entity("@a", None)),
+    );
+
+    let NbtTag::Compound(component) = component.to_codec_nbt() else {
+        panic!("hover component should encode as a compound");
+    };
+    let value = component
+        .get("hover_event")
+        .and_then(NbtTag::compound)
+        .and_then(|hover| hover.get("value"))
+        .and_then(NbtTag::compound)
+        .expect("hover value should encode as a component compound");
+    assert_eq!(value.get("selector"), Some(&NbtTag::String("@a".into())));
+}
+
+#[test]
+fn embedded_registry_payloads_are_preserved_verbatim() {
+    let payload = compound(vec![(
+        "minecraft:custom_name",
+        NbtTag::String("Stone".into()),
+    )]);
+    let component = TextComponent::plain("item").hover_event(
+        text_components::interactivity::HoverEvent::ShowItem {
+            id: "minecraft:stone".into(),
+            count: 1,
+            components: Some(encoded(payload.clone())),
+        },
+    );
+
+    let NbtTag::Compound(component) = component.to_codec_nbt() else {
+        panic!("hover component should encode as a compound");
+    };
+    let hover = component
+        .get("hover_event")
+        .and_then(NbtTag::compound)
+        .expect("hover event should encode as a compound");
+    assert_eq!(hover.get("components"), Some(&payload));
+}
+
+#[test]
 fn modern_style_and_dialog_fields_round_trip() {
     let inline_dialog = compound(vec![
         ("type", NbtTag::String("minecraft:notice".into())),
@@ -239,7 +334,7 @@ fn modern_style_and_dialog_fields_round_trip() {
     component.format.color = Some(Color::Rgb(0x12, 0x34, 0x56));
     component.format.shadow_color = Some(0x7f12_3456);
     component.interactions.click = Some(ClickEvent::ShowDialog {
-        dialog: Dialog::Inline(inline_dialog.into()),
+        dialog: Dialog::Inline(encoded(inline_dialog)),
     });
 
     let encoded = (&component).to_nbt_tag();
