@@ -6,16 +6,12 @@ use std::{
 use simdnbt::{ToNbtTag, owned::NbtTag};
 
 /// An arbitrary NBT value embedded in a text component.
-///
-/// `simdnbt::NbtTag` cannot implement `Eq` or `Hash` because it contains
-/// floating-point values. Text components historically implement both, so
-/// equality and hashing use the tag's lossless binary representation.
 #[derive(Clone)]
 pub struct NbtValue(NbtTag);
 
 impl NbtValue {
     #[must_use]
-    pub const fn new(value: NbtTag) -> Self {
+    pub(crate) const fn new(value: NbtTag) -> Self {
         Self(value)
     }
 
@@ -30,7 +26,7 @@ impl NbtValue {
     }
 
     #[must_use]
-    pub fn is_empty_compound(&self) -> bool {
+    pub(crate) fn is_empty_compound(&self) -> bool {
         matches!(&self.0, NbtTag::Compound(compound) if compound.is_empty())
     }
 
@@ -91,7 +87,7 @@ mod serde_impl {
 
     use serde::{
         Deserialize, Deserializer, Serialize, Serializer,
-        de::{Error as _, MapAccess, SeqAccess, Visitor},
+        de::{Error, MapAccess, SeqAccess, Visitor},
     };
     use simdnbt::{
         Mutf8String,
@@ -149,28 +145,28 @@ mod serde_impl {
 
         fn visit_u8<E>(self, value: u8) -> Result<Self::Value, E>
         where
-            E: serde::de::Error,
+            E: Error,
         {
             self.visit_i16(i16::from(value))
         }
 
         fn visit_u16<E>(self, value: u16) -> Result<Self::Value, E>
         where
-            E: serde::de::Error,
+            E: Error,
         {
             self.visit_i32(i32::from(value))
         }
 
         fn visit_u32<E>(self, value: u32) -> Result<Self::Value, E>
         where
-            E: serde::de::Error,
+            E: Error,
         {
             self.visit_i64(i64::from(value))
         }
 
         fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
         where
-            E: serde::de::Error,
+            E: Error,
         {
             let value = i64::try_from(value).map_err(|_| E::custom("NBT integers are signed"))?;
             self.visit_i64(value)
@@ -186,14 +182,14 @@ mod serde_impl {
 
         fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
         where
-            E: serde::de::Error,
+            E: Error,
         {
             Ok(NbtTag::String(value.into()).into())
         }
 
         fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
         where
-            E: serde::de::Error,
+            E: Error,
         {
             Ok(NbtTag::String(value.into()).into())
         }

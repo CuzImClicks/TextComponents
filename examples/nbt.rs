@@ -1,6 +1,7 @@
+//! Encoding a component to network NBT and reading it back.
 use simdnbt::owned::{BaseNbt, Nbt, NbtCompound, NbtTag};
 use text_components::{
-    Modifier, TextComponent,
+    Modifier, Style, TextComponent,
     format::Color,
     interactivity::{ClickEvent, HoverEvent},
     nbt::{NbtBuilder, ToSNBT},
@@ -24,7 +25,7 @@ fn main() -> Result<(), String> {
         "tellraw @p {}",
         component.build(&NoResolutor, NbtBuilder).to_snbt()
     );
-    println!("{:p}", component);
+    println!("{component:p}");
 
     let nbt = "Holly molly I can get TextComponents from NBTs!"
         .color(Color::Red)
@@ -37,10 +38,10 @@ fn main() -> Result<(), String> {
             )),
         ])
         .build(&NoResolutor, NbtBuilder);
-    println!("{:?}", nbt);
+    println!("{nbt:?}");
     let component =
         TextComponent::from_nbt(&nbt).ok_or(String::from("Cannot recompose the TextComponent!"))?;
-    println!("{:?}", component);
-    println!("{:p}", component);
+    println!("{component:?}");
+    println!("{component:p}");
     Ok(())
 }

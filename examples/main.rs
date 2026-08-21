@@ -1,3 +1,8 @@
+//! Building, styling, resolving and printing components.
+#![cfg_attr(
+    feature = "serde",
+    expect(clippy::unwrap_used, reason = "example code")
+)]
 #[cfg(feature = "custom")]
 use chrono::Utc;
 #[cfg(feature = "serde")]
@@ -8,11 +13,13 @@ use simdnbt::{
     owned::{BaseNbt, Nbt, NbtCompound, NbtTag},
 };
 #[cfg(feature = "custom")]
+use std::borrow::Cow;
+#[cfg(feature = "custom")]
 use text_components::custom::{CustomContent, CustomData, CustomRegistry, Payload};
 #[cfg(feature = "nbt")]
 use text_components::nbt::{NbtBuilder, ToSNBT};
 use text_components::{
-    Modifier, TextComponent,
+    Args, EncodedComponent, Modifier, Style, TextComponent,
     content::{NbtSource, ObjectPlayer, Resolvable},
     fmt::set_display_resolutor,
     format::Color,
@@ -20,6 +27,7 @@ use text_components::{
     resolving::TextResolutor,
     translation::{TranslatedMessage, Translation},
 };
+use text_components_macros::{text, text_nbt};
 use uuid::Uuid;
 
 struct EmptyResolutor;
@@ -101,7 +109,7 @@ impl CustomContent for TimeContent {
 
     fn as_data(&self) -> CustomData {
         CustomData {
-            id: std::borrow::Cow::Borrowed("time"),
+            id: Cow::Borrowed("time"),
             payload: Payload::Empty,
         }
     }
@@ -111,9 +119,11 @@ impl CustomContent for TimeContent {
     }
 }
 
+const FOOTER: EncodedComponent = text_nbt!("<dark_gray>steel.example.net</dark_gray>");
+
 fn main() {
     set_display_resolutor(&EmptyResolutor);
-    let mut resolubles = RESOLUBLE
+    let resolubles = RESOLUBLE
         .message([
             ObjectPlayer::name("MrMelther").reset(),
             TextComponent::scoreboard("MrMelther", "objective").reset(),
@@ -123,7 +133,7 @@ fn main() {
         .color_hex("#6f00ff");
 
     #[cfg(feature = "custom")]
-    (&mut resolubles).add_children(vec!["\n Custom: ".into(), TimeContent.reset()]);
+    let resolubles = resolubles.add_children(vec!["\n Custom: ".into(), TimeContent.reset()]);
 
     let component = CONTENT
         .message([
@@ -136,7 +146,7 @@ fn main() {
             "This text is ShadowcoloRED!"
                 .reset()
                 .shadow_color(255, 128, 0, 0),
-            TranslatedMessage::new("translated", None).reset(),
+            TranslatedMessage::new("translated", Args::None).reset(),
             "This text contains a link!"
                 .click_event(ClickEvent::open_url(
                     "https://github.com/Steel-Foundation/TextComponents",
@@ -147,7 +157,7 @@ fn main() {
         .bold(true)
         .add_child(resolubles);
 
-    println!("\nDebug:\n{:?}", component);
+    println!("\nDebug:\n{component:?}");
     #[cfg(feature = "serde")]
     {
         let mut vec = vec![];
@@ -161,6 +171,15 @@ fn main() {
         "\nNBT (SNBT):\ntellraw @a {}",
         component.build(&EmptyResolutor, NbtBuilder).to_snbt()
     );
-    println!("\nText:\n{}", component);
-    println!("\nPretty Text:\n{:p}", component);
+    println!("\nText:\n{component}");
+    println!("\nPretty Text:\n{component:p}");
+
+    let name = text!("<aqua>[MVP] Cuz_Im_Clicks</aqua>");
+    let text = text!("{name}<gray>: asdf</gray>");
+
+    let link =
+        text!("<click:open_url:'https://github.com/Steel-Foundation/SteelMC'>SteelMC Link</click>");
+    println!("{}", text.to_pretty(&EmptyResolutor));
+    println!("{}", link.to_pretty(&EmptyResolutor));
+    println!("\nFooter NBT: {} bytes", FOOTER.as_bytes().len());
 }

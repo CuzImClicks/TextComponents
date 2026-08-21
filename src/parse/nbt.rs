@@ -1,4 +1,8 @@
-use std::{borrow::Cow, error::Error, fmt::Display};
+use std::{
+    borrow::Cow,
+    error::Error,
+    fmt::{self, Display, Formatter},
+};
 
 #[cfg(feature = "custom")]
 use crate::custom::{CustomData, Payload};
@@ -8,8 +12,8 @@ use crate::{
         Content, NbtSource, Object, ObjectPlayer, PlayerModel, PlayerProperties, Resolvable,
     },
     format::{Color, Format},
-    interactivity::{ClickEvent, Dialog, HoverEvent, Interactivity},
-    translation::TranslatedMessage,
+    interactivity::{ClickEvent, Dialog, HoverEvent, Interactivity, MaybeStatic},
+    translation::{Args, TranslatedMessage},
 };
 use simdnbt::owned::{NbtCompound, NbtList, NbtTag};
 use uuid::Uuid;
@@ -33,7 +37,7 @@ pub enum ComponentDecodeError {
 }
 
 impl Display for ComponentDecodeError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::ExpectedComponent => formatter.write_str("expected a text component"),
             Self::EmptyComponentList => formatter.write_str("component lists cannot be empty"),
@@ -58,7 +62,46 @@ impl Display for ComponentDecodeError {
 
 impl Error for ComponentDecodeError {}
 
+/// A failure turning [`EncodedComponent`](crate::EncodedComponent) bytes back into a tree.
+#[derive(Debug)]
+pub enum DecodeError {
+    /// The bytes were not well-formed NBT.
+    Nbt(simdnbt::Error),
+    Component(ComponentDecodeError),
+}
+
+impl From<simdnbt::Error> for DecodeError {
+    fn from(error: simdnbt::Error) -> Self {
+        Self::Nbt(error)
+    }
+}
+
+impl From<ComponentDecodeError> for DecodeError {
+    fn from(error: ComponentDecodeError) -> Self {
+        Self::Component(error)
+    }
+}
+
+impl Display for DecodeError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Nbt(error) => write!(formatter, "malformed NBT: {error}"),
+            Self::Component(error) => Display::fmt(error, formatter),
+        }
+    }
+}
+
+impl Error for DecodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Nbt(error) => Some(error),
+            Self::Component(error) => Some(error),
+        }
+    }
+}
+
 impl TextComponent {
+    /// Reads a component out of a decoded NBT tag.
     pub fn try_from_nbt(tag: &NbtTag) -> Result<Self, ComponentDecodeError> {
         match tag {
             NbtTag::String(value) => Ok(Self::plain(value.to_string())),
@@ -69,6 +112,7 @@ impl TextComponent {
     }
 
     /// Compatibility wrapper for callers that do not need parse diagnostics.
+    #[must_use]
     pub fn from_nbt(tag: &NbtTag) -> Option<Self> {
         Self::try_from_nbt(tag).ok()
     }
@@ -83,6 +127,7 @@ fn component_from_list(list: &NbtList) -> Result<TextComponent, ComponentDecodeE
     for value in values {
         component
             .children
+            .to_mut()
             .push(TextComponent::try_from_nbt(&value)?);
     }
     Ok(component)
@@ -113,7 +158,7 @@ fn component_from_compound(compound: &NbtCompound) -> Result<TextComponent, Comp
 
     Ok(TextComponent {
         content,
-        children,
+        children: children.into(),
         format: Format::try_from_compound(compound)?,
         interactions: Interactivity::try_from_compound(compound)?,
     })
@@ -174,10 +219,13 @@ fn parse_text(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
 
 fn parse_translatable(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
     let key = required_string(compound, "translate")?;
-    let fallback = compound.get("fallback").and_then(as_string).map(Cow::Owned);
+    let fallback = compound
+        .get("fallback")
+        .and_then(as_string)
+        .map(String::into_boxed_str);
     let args = match compound.get("with") {
-        None => None,
-        Some(NbtTag::List(list)) => Some(
+        None => Args::None,
+        Some(NbtTag::List(list)) => Args::Owned(
             list.as_nbt_tags()
                 .iter()
                 .map(TextComponent::try_from_nbt)
@@ -316,7 +364,7 @@ fn parse_player(
     };
     let hat = compound.get("hat").and_then(as_bool).unwrap_or(true);
     Ok(Content::Object(Object::Player {
-        player,
+        player: Box::new(player),
         hat,
         fallback,
     }))
@@ -329,10 +377,9 @@ fn parse_player_profile(profile: &NbtCompound) -> Result<ObjectPlayer, Component
     }
     let id = match profile.get("id") {
         None => None,
-        Some(NbtTag::IntArray(values)) if values.len() == 4 => {
-            Some([values[0], values[1], values[2], values[3]])
-        }
-        Some(NbtTag::List(NbtList::Int(values))) if values.len() == 4 => {
+        Some(NbtTag::IntArray(values) | NbtTag::List(NbtList::Int(values)))
+            if values.len() == 4 =>
+        {
             Some([values[0], values[1], values[2], values[3]])
         }
         Some(_) => return Err(invalid("id", "a four-integer UUID")),
@@ -431,12 +478,16 @@ impl Interactivity {
         Ok(Self {
             insertion: optional_string(compound, "insertion")?.map(Cow::Owned),
             click: match compound.get("click_event") {
-                Some(NbtTag::Compound(event)) => Some(ClickEvent::try_from_compound(event)?),
+                Some(NbtTag::Compound(event)) => Some(MaybeStatic::Owned(Box::new(
+                    ClickEvent::try_from_compound(event)?,
+                ))),
                 Some(_) => return Err(invalid("click_event", "a click event")),
                 None => None,
             },
             hover: match compound.get("hover_event") {
-                Some(NbtTag::Compound(event)) => Some(HoverEvent::try_from_compound(event)?),
+                Some(NbtTag::Compound(event)) => Some(MaybeStatic::Owned(Box::new(
+                    HoverEvent::try_from_compound(event)?,
+                ))),
                 Some(_) => return Err(invalid("hover_event", "a hover event")),
                 None => None,
             },
@@ -502,11 +553,11 @@ impl HoverEvent {
         let action = required_string(compound, "action")?;
         match action.as_str() {
             "show_text" => Ok(Self::ShowText {
-                value: Box::new(TextComponent::try_from_nbt(
+                value: MaybeStatic::Owned(Box::new(TextComponent::try_from_nbt(
                     compound
                         .get("value")
                         .ok_or(ComponentDecodeError::MissingField("value"))?,
-                )?),
+                )?)),
             }),
             "show_item" => {
                 let count = match compound.get("count") {
@@ -743,7 +794,7 @@ fn as_bool(tag: &NbtTag) -> Option<bool> {
     as_f64(tag).map(|value| value != 0.0)
 }
 
-fn as_i32(tag: &NbtTag) -> Option<i32> {
+const fn as_i32(tag: &NbtTag) -> Option<i32> {
     match tag {
         NbtTag::Byte(value) => Some(i32::from(*value)),
         NbtTag::Short(value) => Some(i32::from(*value)),
@@ -759,7 +810,7 @@ fn as_f32(tag: &NbtTag) -> Option<f32> {
     as_f64(tag).map(|value| value as f32)
 }
 
-fn as_f64(tag: &NbtTag) -> Option<f64> {
+const fn as_f64(tag: &NbtTag) -> Option<f64> {
     match tag {
         NbtTag::Byte(value) => Some(f64::from(*value)),
         NbtTag::Short(value) => Some(f64::from(*value)),

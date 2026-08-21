@@ -4,7 +4,6 @@ use quote::quote;
 use serde_json::Value;
 use std::fs;
 
-/// Count the number of parameters in a translation string
 fn count_parameters(text: &str) -> usize {
     let sequential = text.matches("%s").count();
     let mut positional = 0;
@@ -16,6 +15,9 @@ fn count_parameters(text: &str) -> usize {
     sequential.max(positional)
 }
 
+/// # Panics
+/// If the language file at `path` cannot be read or parsed as JSON.
+#[must_use]
 pub fn build_translations(path: &str) -> TokenStream {
     println!("cargo:rerun-if-changed={path}");
 
@@ -27,17 +29,14 @@ pub fn build_translations(path: &str) -> TokenStream {
 
     let mut stream = TokenStream::new();
 
-    // Add imports
     stream.extend(quote! {
         #![allow(dead_code)]
         use text_components::translation::Translation;
     });
 
-    // Generate constants for each translation
     let mut translations_vec: Vec<_> = translations.iter().collect();
     translations_vec.sort_by_key(|(k, _)| *k);
 
-    // Track used constant names to handle collisions
     let mut used_names = rustc_hash::FxHashMap::default();
 
     for (key, value) in translations_vec {
@@ -48,7 +47,6 @@ pub fn build_translations(path: &str) -> TokenStream {
 
         let param_count = count_parameters(text);
 
-        // Skip translations with more than 8 parameters
         if param_count > 8 {
             eprintln!(
                 "Warning: Translation '{key}' has {param_count} parameters (max 8 supported), skipping"
@@ -58,7 +56,6 @@ pub fn build_translations(path: &str) -> TokenStream {
 
         let mut const_name_str = key.to_shouty_snake_case();
 
-        // Handle collisions by appending a number
         if let Some(count) = used_names.get_mut(&const_name_str) {
             *count += 1;
             const_name_str = format!("{const_name_str}_{count}");

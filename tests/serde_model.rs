@@ -1,12 +1,15 @@
+//! The serde model matches Minecraft's JSON shapes.
 #![cfg(feature = "serde")]
 
 use serde_json::json;
 use simdnbt::owned::{NbtCompound, NbtTag};
 use std::convert::Infallible;
+use text_components::interactivity::MaybeStatic;
 use text_components::{
-    EmbeddedNbtCodec, EncodedNbt, TextComponent,
+    Args, EmbeddedNbtCodec, EncodedNbt, TextComponent,
     content::{NbtSource, Object},
     interactivity::{ClickEvent, Dialog, HoverEvent},
+    translation::TranslatedMessage,
 };
 
 struct CodecOutput(NbtTag);
@@ -25,6 +28,8 @@ fn encoded(value: NbtTag) -> EncodedNbt {
         Err(error) => match error {},
     }
 }
+
+static LEFT_ARGS: [TextComponent; 1] = [TextComponent::const_plain("Notch")];
 
 #[test]
 fn content_variants_use_minecrafts_json_shapes() {
@@ -47,6 +52,28 @@ fn content_variants_use_minecrafts_json_shapes() {
             }),
             json!({"sprite": "minecraft:item/diamond"}),
         ),
+        (
+            TextComponent::translated(TranslatedMessage::new("disconnect.spam", Args::None)),
+            json!({"translate": "disconnect.spam"}),
+        ),
+        (
+            TextComponent::translated(TranslatedMessage::new(
+                "disconnect.spam",
+                Args::Owned(Box::new([])),
+            )),
+            json!({"translate": "disconnect.spam", "with": []}),
+        ),
+        (
+            TextComponent::translated(TranslatedMessage {
+                fallback: Some("%s left the game".into()),
+                ..TranslatedMessage::new("multiplayer.player.left", Args::Static(&LEFT_ARGS))
+            }),
+            json!({
+                "translate": "multiplayer.player.left",
+                "fallback": "%s left the game",
+                "with": [{"text": "Notch"}],
+            }),
+        ),
     ];
 
     for (component, expected) in cases {
@@ -63,14 +90,14 @@ fn interaction_variants_use_minecrafts_json_shapes() {
     let mut patch = NbtCompound::new();
     patch.insert("minecraft:custom_name", "Stone");
     let mut component = TextComponent::plain("events");
-    component.interactions.click = Some(ClickEvent::ShowDialog {
+    component.interactions.click = Some(MaybeStatic::Owned(Box::new(ClickEvent::ShowDialog {
         dialog: Dialog::Reference("minecraft:test".into()),
-    });
-    component.interactions.hover = Some(HoverEvent::ShowItem {
+    })));
+    component.interactions.hover = Some(MaybeStatic::Owned(Box::new(HoverEvent::ShowItem {
         id: "minecraft:stone".into(),
         count: 1,
         components: Some(encoded(NbtTag::Compound(patch))),
-    });
+    })));
     let expected = json!({
         "text": "events",
         "click_event": {
@@ -99,10 +126,12 @@ fn custom_click_payload_is_not_wrapped_in_a_rust_enum_tag() {
     let mut payload = NbtCompound::new();
     payload.insert("value", 3_i32);
     let mut component = TextComponent::plain("custom");
-    component.interactions.click = Some(ClickEvent::Custom(CustomData {
-        id: "steel:test".into(),
-        payload: Payload::Nbt(NbtTag::Compound(payload).into()),
-    }));
+    component.interactions.click = Some(MaybeStatic::Owned(Box::new(ClickEvent::Custom(
+        CustomData {
+            id: "steel:test".into(),
+            payload: Payload::Nbt(NbtTag::Compound(payload).into()),
+        },
+    ))));
     let encoded = serde_json::to_value(component).expect("component should serialize");
 
     assert_eq!(

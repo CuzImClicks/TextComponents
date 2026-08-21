@@ -1,1 +1,2 @@
-fn main() {}
+//! Empty binary target.
+const fn main() {}

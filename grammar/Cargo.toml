@@ -1,0 +1,22 @@
+[package]
+name = "text_components_grammar"
+description = "MiniMessage grammar shared by the text_components runtime parser and macros"
+repository = "https://github.com/Steel-Foundation/TextComponents"
+license = "GPL-3.0-or-later"
+version = "0.2.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[features]
+# `ParseError::render`: the annotated-snippet presentation of an error
+render = ["dep:annotate-snippets"]
+
+[dependencies]
+annotate-snippets = { version = "0.12.16", optional = true }
+unicode-ident = "1.0"
+
+# so `cargo test -p text_components_grammar` can render errors
+[dev-dependencies]
+text_components_grammar = { path = ".", features = ["render"] }

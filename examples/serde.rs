@@ -1,7 +1,9 @@
-use text_components::{Modifier, TextComponent, format::Color, translation::TranslatedMessage};
+//! Serializing components and translations with serde.
+#![expect(clippy::unwrap_used, reason = "example code")]
+use text_components::{Args, Style, TextComponent, format::Color, translation::TranslatedMessage};
 
 fn main() {
-    let component: TextComponent = TranslatedMessage::new("key", None)
+    let component: TextComponent = TranslatedMessage::new("key", Args::None)
         .color(Color::Blue)
         .bold(true);
     println!("{}", serde_json::to_string_pretty(&component).unwrap());
@@ -13,5 +15,5 @@ fn main() {
         }",
     )
     .unwrap();
-    println!("{:p}", component)
+    println!("{component:p}");
 }

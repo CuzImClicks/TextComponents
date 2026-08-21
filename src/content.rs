@@ -1,12 +1,16 @@
 #[cfg(feature = "custom")]
 use crate::custom::CustomData;
 use crate::{
-    TextComponent, format::Format, interactivity::Interactivity, translation::TranslatedMessage,
+    TextComponent,
+    format::{Color, Format},
+    interactivity::Interactivity,
+    translation::TranslatedMessage,
 };
 use std::borrow::Cow;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+/// What a component displays.
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case", untagged))]
 pub enum Content {
     Text {
@@ -34,6 +38,7 @@ impl From<String> for Content {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+/// An image drawn inline with the text.
 #[cfg_attr(feature = "serde", serde(untagged))]
 pub enum Object {
     Atlas {
@@ -50,7 +55,8 @@ pub enum Object {
         fallback: Option<Box<TextComponent>>,
     },
     Player {
-        player: ObjectPlayer,
+        /// The player profile to render.
+        player: Box<ObjectPlayer>,
         #[cfg_attr(
             feature = "serde",
             serde(skip_serializing_if = "Clone::clone", default)
@@ -64,6 +70,7 @@ pub enum Object {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// The player a head object renders, named by any one of these fields.
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct ObjectPlayer {
     #[cfg_attr(
@@ -103,7 +110,7 @@ pub struct ObjectPlayer {
     pub properties: Vec<PlayerProperties>,
 }
 impl ObjectPlayer {
-    /// Creates a [ObjectPlayer] from a player's name.
+    /// Creates a [`ObjectPlayer`] from a player's name.
     pub fn name<T: Into<Cow<'static, str>>>(name: T) -> Self {
         ObjectPlayer {
             name: Some(name.into()),
@@ -115,8 +122,9 @@ impl ObjectPlayer {
             properties: vec![],
         }
     }
-    /// Creates a [ObjectPlayer] from the id of a player.
-    pub fn id(id: [i32; 4]) -> Self {
+    /// Creates a [`ObjectPlayer`] from the id of a player.
+    #[must_use]
+    pub const fn id(id: [i32; 4]) -> Self {
         ObjectPlayer {
             name: None,
             id: Some(id),
@@ -127,7 +135,7 @@ impl ObjectPlayer {
             properties: vec![],
         }
     }
-    /// Creates a [ObjectPlayer] from the path to a texture of a resource pack.
+    /// Creates a [`ObjectPlayer`] from the path to a texture of a resource pack.
     pub fn texture<T: Into<Cow<'static, str>>>(path: T) -> Self {
         ObjectPlayer {
             name: None,
@@ -139,9 +147,7 @@ impl ObjectPlayer {
             properties: vec![],
         }
     }
-    /// Creates a [ObjectPlayer] from a player's skin properties.
-    /// * `value` - A [texture data json](https://minecraft.wiki/w/Mojang_API#Query_player's_skin_and_cape) encoded in Base64
-    /// * `signature` - An optional Mojang's signature, also encoded in Base64
+    /// Creates a [`ObjectPlayer`] from a player's skin properties.
     pub fn property<T: Into<Cow<'static, str>>, R: Into<Cow<'static, str>>>(
         value: T,
         signature: Option<R>,
@@ -160,7 +166,8 @@ impl ObjectPlayer {
             }],
         }
     }
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub(crate) const fn is_empty(&self) -> bool {
         self.name.is_none()
             && self.id.is_none()
             && self.texture.is_none()
@@ -173,6 +180,7 @@ impl ObjectPlayer {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+/// The arm width of a player skin.
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum PlayerModel {
     Slim,
@@ -180,6 +188,7 @@ pub enum PlayerModel {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A signed skin property from the session server.
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub struct PlayerProperties {
     pub name: Cow<'static, str>,
@@ -188,10 +197,10 @@ pub struct PlayerProperties {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Content whose value the server has to look up.
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
 pub enum Resolvable {
     /// The selector must only accept 1 target
-    /// #### Needs [resolution](TextComponent::resolve)
     #[cfg_attr(feature = "serde", serde(rename = "score"))]
     Scoreboard {
         #[cfg_attr(feature = "serde", serde(rename = "name"))]
@@ -230,12 +239,16 @@ pub enum Resolvable {
 }
 
 #[cfg(feature = "serde")]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde `skip_serializing_if` needs `fn(&T) -> bool`"
+)]
 const fn is_false(value: &bool) -> bool {
     !*value
 }
 
 #[cfg(feature = "serde")]
-fn default_atlas() -> Cow<'static, str> {
+const fn default_atlas() -> Cow<'static, str> {
     Cow::Borrowed("minecraft:blocks")
 }
 
@@ -244,18 +257,22 @@ fn is_default_atlas(value: &str) -> bool {
     value == "minecraft:blocks"
 }
 impl Resolvable {
+    /// The grey comma vanilla puts between entities.
+    #[must_use]
     pub fn entity_separator() -> Box<TextComponent> {
         Box::new(TextComponent {
             content: Content::Text {
                 text: Cow::Borrowed(", "),
             },
             format: Format {
-                color: Some(crate::format::Color::Gray),
+                color: Some(Color::Gray),
                 ..Default::default()
             },
             ..Default::default()
         })
     }
+    /// The comma vanilla puts between NBT values.
+    #[must_use]
     pub fn nbt_separator() -> Box<TextComponent> {
         Box::new(TextComponent {
             content: Content::Text {
@@ -268,6 +285,7 @@ impl Resolvable {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(::serde::Serialize, ::serde::Deserialize))]
+/// Where a [`Resolvable::NBT`] reads its tag from.
 #[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
 pub enum NbtSource {
     Entity(Cow<'static, str>),
@@ -275,15 +293,16 @@ pub enum NbtSource {
     Storage(Cow<'static, str>),
 }
 impl NbtSource {
-    /// Creates a [NbtSource] from a entity selector.
+    /// Creates a [`NbtSource`] from a entity selector.
     pub fn entity<T: Into<Cow<'static, str>>>(selector: T) -> Self {
         NbtSource::Entity(selector.into())
     }
-    /// Creates a [NbtSource] from a block coordinates.
+    /// Creates a [`NbtSource`] from a block coordinates.
+    #[must_use]
     pub fn block(x: i32, y: i32, z: i32) -> Self {
         NbtSource::Block(Cow::Owned(format!("{x} {y} {z}")))
     }
-    /// Creates a [NbtSource] from a Nbt Storage identifier.
+    /// Creates a [`NbtSource`] from a Nbt Storage identifier.
     pub fn storage<T: Into<Cow<'static, str>>>(identifier: T) -> Self {
         NbtSource::Storage(identifier.into())
     }
@@ -293,7 +312,7 @@ impl From<Content> for TextComponent {
     fn from(value: Content) -> Self {
         TextComponent {
             content: value,
-            children: Vec::new(),
+            children: Cow::Borrowed(&[]),
             format: Format::new(),
             interactions: Interactivity::new(),
         }
@@ -303,7 +322,7 @@ impl From<Object> for TextComponent {
     fn from(value: Object) -> Self {
         TextComponent {
             content: Content::Object(value),
-            children: Vec::new(),
+            children: Cow::Borrowed(&[]),
             format: Format::new(),
             interactions: Interactivity::new(),
         }
@@ -313,11 +332,11 @@ impl From<ObjectPlayer> for TextComponent {
     fn from(value: ObjectPlayer) -> Self {
         TextComponent {
             content: Content::Object(Object::Player {
-                player: value,
+                player: Box::new(value),
                 hat: true,
                 fallback: None,
             }),
-            children: Vec::new(),
+            children: Cow::Borrowed(&[]),
             format: Format::new(),
             interactions: Interactivity::new(),
         }
@@ -327,7 +346,7 @@ impl From<Resolvable> for TextComponent {
     fn from(value: Resolvable) -> Self {
         TextComponent {
             content: Content::Resolvable(value),
-            children: Vec::new(),
+            children: Cow::Borrowed(&[]),
             format: Format::new(),
             interactions: Interactivity::new(),
         }

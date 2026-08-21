@@ -1,21 +1,27 @@
-use std::sync::Arc;
+use std::{convert::Infallible, sync::Arc};
 
 #[cfg(feature = "custom")]
 use crate::custom::CustomData;
 use crate::{
     TextComponent,
-    content::{Content, Resolvable},
+    content::{Content, Object, Resolvable},
+    interactivity::{HoverEvent, MaybeStatic},
 };
 
-/// Recommendation: Implement this on the World and Player
+/// Fills in the content this crate cannot render on its own.
 pub trait TextResolutor {
+    /// Resolves content that needs no lookup, by default a clone.
     fn resolve_other(&self, content: &Content) -> TextComponent {
         TextComponent::from(content.clone())
     }
+    /// Resolves a scoreboard, entity, or NBT value.
     fn resolve_content(&self, resolvable: &Resolvable) -> TextComponent;
+    /// Resolves custom content, [None] to drop it.
     #[cfg(feature = "custom")]
     fn resolve_custom(&self, data: &CustomData) -> Option<TextComponent>;
+    /// The translation for a key, [None] when it is unknown.
     fn translate(&self, key: &str) -> Option<String>;
+    /// Splits a translated string into literal parts, each paired with the 1-based argument that follows it, or 0 for none.
     fn split_translation(&self, text: String) -> Vec<(String, usize)> {
         let mut positions = vec![(0, 0, 0), (text.len(), 0, 0)];
         for i in 1..=8 {
@@ -39,21 +45,23 @@ pub trait TextResolutor {
     }
 }
 
-/// A resolver for component contents that may fail, such as selectors, scores,
-/// and NBT lookups performed by a command source.
+/// A resolver for component contents that may fail.
 pub trait TryTextResolutor {
     type Error;
 
+    /// Resolves content that needs no lookup, by default a clone.
     fn try_resolve_other(&self, content: &Content) -> Result<TextComponent, Self::Error> {
         Ok(TextComponent::from(content.clone()))
     }
 
+    /// Resolves a scoreboard, entity, or NBT value; `recursion_depth` is how deep this content sits below the root component, and anything past 100 is left unresolved.
     fn try_resolve_content(
         &self,
         resolvable: &Resolvable,
         recursion_depth: usize,
     ) -> Result<TextComponent, Self::Error>;
 
+    /// Resolves custom content, [None] to drop it.
     #[cfg(feature = "custom")]
     fn try_resolve_custom(&self, data: &CustomData) -> Result<Option<TextComponent>, Self::Error> {
         let _ = data;
@@ -101,6 +109,7 @@ impl<T: TryTextResolutor> TryTextResolutor for Arc<T> {
     }
 }
 
+/// A resolver that renders every lookup as a placeholder.
 pub struct NoResolutor;
 impl TextResolutor for NoResolutor {
     fn resolve_content(&self, resolvable: &Resolvable) -> TextComponent {
@@ -116,7 +125,7 @@ impl TextResolutor for NoResolutor {
     }
 
     #[cfg(feature = "custom")]
-    fn resolve_custom(&self, data: &crate::custom::CustomData) -> Option<TextComponent> {
+    fn resolve_custom(&self, data: &CustomData) -> Option<TextComponent> {
         Some(TextComponent::plain(data.id.clone()))
     }
 
@@ -126,6 +135,7 @@ impl TextResolutor for NoResolutor {
 }
 
 impl TextComponent {
+    /// Resolves this component, then renders it with `target`.
     pub fn build<R: TextResolutor + ?Sized, S: BuildTarget>(
         &self,
         resolutor: &R,
@@ -134,6 +144,8 @@ impl TextComponent {
         target.build_component(resolutor, &self.resolve(resolutor))
     }
 
+    /// Fills in this component and everything below it.
+    #[must_use]
     pub fn resolve<R: TextResolutor + ?Sized>(&self, resolutor: &R) -> TextComponent {
         match self.try_resolve(&InfallibleResolver(resolutor)) {
             Ok(component) => component,
@@ -141,6 +153,7 @@ impl TextComponent {
         }
     }
 
+    /// Fills in this component and everything below it, stopping at the first error.
     pub fn try_resolve<R: TryTextResolutor + ?Sized>(
         &self,
         resolutor: &R,
@@ -148,8 +161,7 @@ impl TextComponent {
         self.try_resolve_at_depth(resolutor, 0)
     }
 
-    /// Resolves content nested inside a resolver-provided value without
-    /// resetting vanilla's recursion-depth accounting.
+    /// Resolves content nested inside a resolver-provided value.
     pub fn try_resolve_from_depth<R: TryTextResolutor + ?Sized>(
         &self,
         resolutor: &R,
@@ -171,22 +183,21 @@ impl TextComponent {
         let mut component = match &self.content {
             Content::Translate(message) => {
                 let mut message = message.clone();
-                message.args = match &message.args {
-                    Some(args) => Some(
-                        args.iter()
-                            .map(|arg| arg.try_resolve_at_depth(resolutor, content_depth))
-                            .collect::<Result<Vec<_>, _>>()?
-                            .into_boxed_slice(),
-                    ),
-                    None => None,
-                };
+                if !message.args.is_none() {
+                    let args = message
+                        .args
+                        .iter()
+                        .map(|arg| arg.try_resolve_at_depth(resolutor, content_depth))
+                        .collect::<Result<Vec<_>, _>>()?
+                        .into_boxed_slice();
+                    message.args = crate::Args::Owned(args);
+                }
                 resolutor.try_resolve_other(&Content::Translate(message))?
             }
             Content::Object(object) => {
                 let mut object = object.clone();
                 let fallback = match &mut object {
-                    crate::content::Object::Atlas { fallback, .. }
-                    | crate::content::Object::Player { fallback, .. } => fallback,
+                    Object::Atlas { fallback, .. } | Object::Player { fallback, .. } => fallback,
                 };
                 if let Some(value) = fallback {
                     **value = value.try_resolve_at_depth(resolutor, content_depth)?;
@@ -210,7 +221,7 @@ impl TextComponent {
             content => resolutor.try_resolve_other(content)?,
         };
 
-        component.children.append(
+        component.children.to_mut().append(
             &mut self
                 .children
                 .iter()
@@ -218,9 +229,13 @@ impl TextComponent {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let mut interactions = self.interactions.clone();
-        if let Some(crate::interactivity::HoverEvent::ShowText { value }) = &mut interactions.hover
+        if let Some(hover) = &interactions.hover
+            && let HoverEvent::ShowText { value } = hover.get()
         {
-            **value = value.try_resolve_at_depth(resolutor, recursion_depth + 1)?;
+            let resolved = value.try_resolve_at_depth(resolutor, recursion_depth + 1)?;
+            interactions.hover = Some(MaybeStatic::Owned(Box::new(HoverEvent::ShowText {
+                value: MaybeStatic::Owned(Box::new(resolved)),
+            })));
         }
         interactions.mix(&mut component.interactions);
         component.format = self.format.mix(&component.format);
@@ -232,7 +247,7 @@ impl TextComponent {
 struct InfallibleResolver<'a, R: ?Sized>(&'a R);
 
 impl<R: TextResolutor + ?Sized> TryTextResolutor for InfallibleResolver<'_, R> {
-    type Error = std::convert::Infallible;
+    type Error = Infallible;
 
     fn try_resolve_other(&self, content: &Content) -> Result<TextComponent, Self::Error> {
         Ok(self.0.resolve_other(content))
@@ -252,8 +267,10 @@ impl<R: TextResolutor + ?Sized> TryTextResolutor for InfallibleResolver<'_, R> {
     }
 }
 
+/// Renders a resolved component into some output form.
 pub trait BuildTarget {
     type Result;
+    /// Renders `component` together with its children.
     fn build_component<R: TextResolutor + ?Sized>(
         &self,
         resolutor: &R,

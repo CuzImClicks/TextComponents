@@ -1,4 +1,6 @@
+//! Resolving server-side content, fallible and depth-limited.
 use std::{cell::Cell, convert::Infallible};
+use text_components::interactivity::MaybeStatic;
 
 use text_components::{
     TextComponent,
@@ -50,22 +52,23 @@ fn resolution_reaches_hover_text_and_object_fallbacks() {
         sprite: "minecraft:item/diamond".into(),
         fallback: Some(Box::new(TextComponent::entity("@fallback", None))),
     });
-    component.interactions.hover =
-        Some(HoverEvent::show_text(TextComponent::entity("@hover", None)));
+    component.interactions.hover = Some(MaybeStatic::Owned(Box::new(HoverEvent::show_text(
+        TextComponent::entity("@hover", None),
+    ))));
 
-    let resolved = component
+    let output = component
         .try_resolve(&resolver)
         .expect("nested resolution should succeed");
     assert!(matches!(
-        resolved.content,
+        output.content,
         Content::Object(Object::Atlas {
             fallback: Some(ref fallback),
             ..
         }) if **fallback == TextComponent::plain("resolved:@fallback")
     ));
     assert!(matches!(
-        resolved.interactions.hover,
-        Some(HoverEvent::ShowText { ref value })
+        output.interactions.hover.as_deref(),
+        Some(HoverEvent::ShowText { value })
             if **value == TextComponent::plain("resolved:@hover")
     ));
     assert_eq!(resolver.calls.get(), 2);
@@ -80,14 +83,14 @@ fn depth_limit_copies_remaining_components_without_resolving_them() {
     let mut component = unresolved.clone();
     for _ in 0..=100 {
         let mut parent = TextComponent::new();
-        parent.children.push(component);
+        parent.children.to_mut().push(component);
         component = parent;
     }
 
-    let resolved = component
+    let output = component
         .try_resolve(&resolver)
         .expect("depth limiting should not fail");
-    let mut current = &resolved;
+    let mut current = &output;
     for _ in 0..=100 {
         current = &current.children[0];
     }

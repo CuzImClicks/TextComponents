@@ -1,0 +1,24 @@
+[package]
+name = "text_components_macros"
+description = "MiniMessage macros (text!, text_nbt!) for text_components"
+repository = "https://github.com/Steel-Foundation/TextComponents"
+license = "GPL-3.0-or-later"
+version = "0.2.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+rustc-literal-escaper = "0.0.8"
+text_components_grammar = { path = "../grammar", version = "=0.2.0", features = ["render"] }
+
+# The macros expand to `::text_components::…` paths so doc tests need this to compile
+[dev-dependencies]
+text_components = { path = "..", features = ["macros", "nbt", "minimessage"] }

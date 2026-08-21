@@ -1,20 +1,74 @@
 #[cfg(feature = "custom")]
 use crate::custom::Payload;
 use crate::{
-    Modifier, TextComponent,
+    Modifier, Style, TextComponent,
     content::{Content, NbtSource, Object, PlayerModel, Resolvable},
     format::{Color, Format},
     interactivity::{ClickEvent, Dialog, HoverEvent, Interactivity},
     resolving::{BuildTarget, NoResolutor, TextResolutor},
+    translation::TranslatedMessage,
 };
 use simdnbt::{
     FromNbtTag, Mutf8String, ToNbtTag,
-    owned::{BaseNbt, Nbt, NbtCompound, NbtList, NbtTag},
+    owned::{NbtCompound, NbtList, NbtTag},
 };
-use std::ops::Deref as _;
 
-pub use crate::parse::nbt::ComponentDecodeError;
+use super::writers::{write_component_elem, write_mutf8};
+use super::{TAG_COMPOUND, TAG_LIST, TAG_STRING};
 
+fn encodes_as_string(component: &TextComponent) -> bool {
+    matches!(&component.content, Content::Text { .. })
+        && component.children.is_empty()
+        && component.format.is_none()
+        && component.interactions.is_none()
+}
+
+impl TranslatedMessage {
+    /// Encodes `{translate, fallback?, with?}` straight into network NBT.
+    ///
+    /// # Panics
+    /// If the message carries more args than an NBT list length can hold.
+    #[must_use]
+    pub fn encode(&self) -> crate::EncodedComponent {
+        let mut buf = Vec::with_capacity(64);
+        buf.push(TAG_COMPOUND);
+        buf.push(TAG_STRING);
+        write_mutf8(&mut buf, "translate");
+        write_mutf8(&mut buf, &self.key);
+        if let Some(fallback) = &self.fallback {
+            buf.push(TAG_STRING);
+            write_mutf8(&mut buf, "fallback");
+            write_mutf8(&mut buf, fallback);
+        }
+        if !self.args.is_none() {
+            let args = self.args.as_slice();
+            buf.push(TAG_LIST);
+            write_mutf8(&mut buf, "with");
+            let len = i32::try_from(args.len())
+                .expect("more translation args than an NBT list length can carry");
+            if !args.is_empty() && args.iter().all(encodes_as_string) {
+                buf.push(TAG_STRING);
+                buf.extend_from_slice(&len.to_be_bytes());
+                for arg in args {
+                    let Content::Text { text } = &arg.content else {
+                        unreachable!("encodes_as_string only matches text content");
+                    };
+                    write_mutf8(&mut buf, text);
+                }
+            } else {
+                buf.push(TAG_COMPOUND);
+                buf.extend_from_slice(&len.to_be_bytes());
+                for arg in args {
+                    write_component_elem(&mut buf, arg);
+                }
+            }
+        }
+        buf.push(0);
+        crate::EncodedComponent::from_vec(buf)
+    }
+}
+
+/// Renders a component as the NBT tag vanilla's component codec expects.
 pub struct NbtBuilder;
 
 impl BuildTarget for NbtBuilder {
@@ -63,10 +117,16 @@ impl NbtBuilder {
 
 impl TextComponent {
     /// Encodes this component through Vanilla's recursive component codec.
+    #[must_use]
     pub fn to_codec_nbt(&self) -> NbtTag {
         NbtBuilder.build_component(&NoResolutor, self)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match arm per tag/variant; splitting hides the shape"
+    )]
+    /// The component vanilla shows for an NBT tag, styled by tag type.
     pub fn nbt_display<T: Into<NbtTag>>(tag: T) -> Self {
         let tag = tag.into();
         match tag {
@@ -83,10 +143,10 @@ impl TextComponent {
                 .to_string()
                 .color(Color::Gold)
                 .add_child("l".color(Color::Red)),
-            NbtTag::Float(n) => format!("{:?}", n)
+            NbtTag::Float(n) => format!("{n:?}")
                 .color(Color::Gold)
                 .add_child("f".color(Color::Red)),
-            NbtTag::Double(n) => format!("{:?}", n)
+            NbtTag::Double(n) => format!("{n:?}")
                 .color(Color::Gold)
                 .add_child("d".color(Color::Red)),
             NbtTag::ByteArray(items) => {
@@ -177,114 +237,11 @@ impl TextComponent {
     }
 }
 
-pub trait ToSNBT {
-    fn to_snbt(&self) -> String;
-}
-
-impl ToSNBT for Nbt {
-    fn to_snbt(&self) -> String {
-        match self {
-            Nbt::Some(base) => base.to_snbt(),
-            Nbt::None => String::new(),
-        }
-    }
-}
-impl ToSNBT for BaseNbt {
-    fn to_snbt(&self) -> String {
-        let mut child = String::new();
-        if !self.name().is_empty() {
-            if self.name().to_str().contains(':') {
-                child = format!("\"{}\":", self.name());
-            } else {
-                child = format!("{}:", self.name());
-            }
-        }
-        child.push_str(&self.deref().to_snbt());
-        child
-    }
-}
-impl ToSNBT for NbtCompound {
-    fn to_snbt(&self) -> String {
-        if self.len() == 1 {
-            for (name, tag) in self.iter() {
-                if name.is_empty() || name.to_str() == "text" {
-                    return tag.to_snbt();
-                }
-            }
-        }
-        let mut snbt = vec![];
-        for (name, tag) in self.iter() {
-            let mut child = String::new();
-            if !name.is_empty() {
-                if name.to_str().contains(':') {
-                    child = format!("\"{}\":", name);
-                } else {
-                    child = format!("{}:", name);
-                }
-            }
-            child.push_str(&tag.to_snbt());
-            snbt.push(child);
-        }
-        format!("{{{}}}", snbt.join(","))
-    }
-}
-impl ToSNBT for NbtTag {
-    fn to_snbt(&self) -> String {
-        match self {
-            NbtTag::Byte(n) => format!("{n}b"),
-            NbtTag::Short(n) => format!("{n}s"),
-            NbtTag::Int(n) => n.to_string(),
-            NbtTag::Long(n) => format!("{n}l"),
-            NbtTag::Float(n) => format!("{:?}f", n),
-            NbtTag::Double(n) => format!("{:?}d", n),
-            NbtTag::ByteArray(items) => format!(
-                "[B;{}]",
-                items
-                    .iter()
-                    .map(|n| format!("{n}b"))
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ),
-            NbtTag::String(str) => format!(
-                "\"{}\"",
-                // TODO: Check escapable characters
-                str.to_string()
-                    .replace('\\', "\\\\")
-                    .replace('\n', "\\n")
-                    .replace('"', "\\\"")
-                    .replace('\'', "\\'")
-            ),
-            NbtTag::List(items) => format!(
-                "[{}]",
-                items
-                    .as_nbt_tags()
-                    .iter()
-                    .map(|item| item.to_snbt())
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ),
-            NbtTag::Compound(nbt) => nbt.to_snbt(),
-            NbtTag::IntArray(items) => format!(
-                "[I;{}]",
-                items
-                    .iter()
-                    .map(|n| n.to_string())
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ),
-            NbtTag::LongArray(items) => format!(
-                "[L;{}]",
-                items
-                    .iter()
-                    .map(|n| format!("{n}l"))
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ),
-        }
-    }
-}
-
 impl Content {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one match arm per tag/variant; splitting hides the shape"
+    )]
     fn to_compound<R: TextResolutor + ?Sized>(
         &self,
         compound: &mut Vec<(Mutf8String, NbtTag)>,
@@ -381,17 +338,18 @@ impl Content {
             Content::Translate(msg) => {
                 compound.push(("translate".into(), msg.key.to_nbt_tag()));
                 if let Some(fallback) = &msg.fallback {
-                    compound.push(("fallback".into(), fallback.to_nbt_tag()));
+                    compound.push(("fallback".into(), (&**fallback).to_nbt_tag()));
                 }
-                if let Some(args) = &msg.args {
+                if !msg.args.is_none() {
                     compound.push((
                         "with".into(),
                         NbtTag::List(NbtList::from(
-                            args.iter()
+                            msg.args
+                                .iter()
                                 .map(|component| target.build_component(resolutor, component))
                                 .collect::<Vec<_>>(),
                         )),
-                    ))
+                    ));
                 }
             }
             Content::Resolvable(Resolvable::Scoreboard {
@@ -456,7 +414,7 @@ impl Content {
                     NbtTag::Compound(NbtCompound::from_values(custom)),
                 ));
             }
-        };
+        }
     }
 }
 
@@ -465,44 +423,26 @@ impl Format {
         if let Some(color) = &self.color {
             compound.push((
                 "color".into(),
-                match color {
-                    Color::Black => NbtTag::String("black".into()),
-                    Color::DarkBlue => NbtTag::String("dark_blue".into()),
-                    Color::DarkGreen => NbtTag::String("dark_green".into()),
-                    Color::DarkAqua => NbtTag::String("dark_aqua".into()),
-                    Color::DarkRed => NbtTag::String("dark_red".into()),
-                    Color::DarkPurple => NbtTag::String("dark_purple".into()),
-                    Color::Gold => NbtTag::String("gold".into()),
-                    Color::Gray => NbtTag::String("gray".into()),
-                    Color::DarkGray => NbtTag::String("dark_gray".into()),
-                    Color::Blue => NbtTag::String("blue".into()),
-                    Color::Green => NbtTag::String("green".into()),
-                    Color::Aqua => NbtTag::String("aqua".into()),
-                    Color::Red => NbtTag::String("red".into()),
-                    Color::LightPurple => NbtTag::String("light_purple".into()),
-                    Color::Yellow => NbtTag::String("yellow".into()),
-                    Color::White => NbtTag::String("white".into()),
-                    Color::Rgb(r, g, b) => NbtTag::String(format!("#{r:02X}{g:02X}{b:02X}").into()),
-                },
+                NbtTag::String(color.codec_name().as_ref().into()),
             ));
         }
         if let Some(value) = &self.font {
             compound.push(("font".into(), value.to_nbt_tag()));
         }
         if let Some(value) = self.bold {
-            compound.push(("bold".into(), NbtTag::Byte(value as i8)));
+            compound.push(("bold".into(), NbtTag::Byte(i8::from(value))));
         }
         if let Some(value) = self.italic {
-            compound.push(("italic".into(), NbtTag::Byte(value as i8)));
+            compound.push(("italic".into(), NbtTag::Byte(i8::from(value))));
         }
         if let Some(value) = self.underlined {
-            compound.push(("underlined".into(), NbtTag::Byte(value as i8)));
+            compound.push(("underlined".into(), NbtTag::Byte(i8::from(value))));
         }
         if let Some(value) = self.strikethrough {
-            compound.push(("strikethrough".into(), NbtTag::Byte(value as i8)));
+            compound.push(("strikethrough".into(), NbtTag::Byte(i8::from(value))));
         }
         if let Some(value) = self.obfuscated {
-            compound.push(("obfuscated".into(), NbtTag::Byte(value as i8)));
+            compound.push(("obfuscated".into(), NbtTag::Byte(i8::from(value))));
         }
         if let Some(color) = self.shadow_color {
             compound.push(("shadow_color".into(), NbtTag::Int(color)));
@@ -560,10 +500,10 @@ impl HoverEvent {
             HoverEvent::ShowEntity { name, id, uuid } => {
                 let uuid = uuid.as_u64_pair();
                 let uuid = vec![
-                    ((uuid.0 >> 32) & 0xFFFFFFFF) as i32,
-                    (uuid.0 & 0xFFFFFFFF) as i32,
-                    ((uuid.1 >> 32) & 0xFFFFFFFF) as i32,
-                    (uuid.1 & 0xFFFFFFFF) as i32,
+                    ((uuid.0 >> 32) & 0xFFFF_FFFF) as i32,
+                    (uuid.0 & 0xFFFF_FFFF) as i32,
+                    ((uuid.1 >> 32) & 0xFFFF_FFFF) as i32,
+                    (uuid.1 & 0xFFFF_FFFF) as i32,
                 ];
                 let mut compound = vec![
                     ("action".into(), NbtTag::String("show_entity".into())),
@@ -579,7 +519,21 @@ impl HoverEvent {
     }
 }
 
+impl HoverEvent {
+    /// Encodes this event through Vanilla's codec, without resolution.
+    #[must_use]
+    pub fn to_codec_nbt(&self) -> NbtTag {
+        self.to_nbt_tag(&NoResolutor)
+    }
+}
+
 impl ClickEvent {
+    /// Encodes this event through Vanilla's codec.
+    #[must_use]
+    pub fn to_codec_nbt(&self) -> NbtTag {
+        self.to_nbt_tag()
+    }
+
     fn to_nbt_tag(&self) -> NbtTag {
         let mut values = vec![];
         match &self {
@@ -621,7 +575,7 @@ impl ClickEvent {
                     values.push(("payload".into(), payload.to_nbt_tag()));
                 }
             }
-        };
+        }
         NbtTag::Compound(NbtCompound::from_values(values))
     }
 }

@@ -46,7 +46,7 @@ const OBFUSCATION_CHARS: [char; 822] = [
     'ɫ', 'ɬ', 'ɭ', 'ɮ', 'ɯ', 'ɰ', 'ɱ', 'ɲ', 'ɳ', 'ɴ', 'ɵ', 'ɶ', 'ɷ', 'ɸ', 'ɹ', 'ɺ', 'ɻ', 'ɼ', 'ɽ',
     'ɾ', 'ɿ', 'ʀ', 'ʁ', 'ʂ', 'ʃ', 'ʄ', 'ʅ', 'ʆ', 'ʇ', 'ʈ', 'ʉ', 'ʊ', 'ʋ', 'ʌ', 'ʍ', 'ʎ', 'ʏ', 'ʐ',
     'ʑ', 'ʒ', 'ʓ', 'ʔ', 'ʕ', 'ʖ', 'ʗ', 'ʘ', 'ʙ', 'ʚ', 'ʛ', 'ʜ', 'ʝ', 'ʞ', 'ʟ', 'ʠ', 'ʡ', 'ʢ', 'ʣ',
-    'ʤ', 'ʥ', 'ʦ', 'ʧ', 'ʨ', 'ʩ', 'ʪ', 'ʫ', 'ʬ', 'ʭ', 'ʮ', 'ʯ', 'Ά', '·', 'Έ', 'Ή', 'Ί', '΋', 'Ό',
+    'ʤ', 'ʥ', 'ʦ', 'ʧ', 'ʨ', 'ʩ', 'ʪ', 'ʫ', 'ʬ', 'ʭ', 'ʮ', 'ʯ', 'Ά', '·', 'Έ', 'Ή', 'Ί', '΋', 'Ό',
     '΍', 'Ύ', 'Ώ', 'ΐ', 'Α', 'Β', 'Γ', 'Δ', 'Ε', 'Ζ', 'Η', 'Θ', 'Ι', 'Κ', 'Λ', 'Μ', 'Ν', 'Ξ', 'Ο',
     'Π', 'Ρ', '΢', 'Σ', 'Τ', 'Υ', 'Φ', 'Χ', 'Ψ', 'Ω', 'Ϊ', 'Ϋ', 'ά', 'έ', 'ή', 'ί', 'ΰ', 'α', 'β',
     'γ', 'δ', 'ε', 'ζ', 'η', 'θ', 'ι', 'κ', 'λ', 'μ', 'ν', 'ξ', 'ο', 'π', 'ρ', 'ς', 'σ', 'τ', 'υ',
@@ -60,6 +60,7 @@ const OBFUSCATION_CHARS: [char; 822] = [
     'ы', 'ь', 'э', 'ю', 'я',
 ];
 
+/// Renders a component as plain text.
 pub struct TextBuilder;
 impl TextBuilder {
     fn stringify_content<R: TextResolutor + ?Sized, S: BuildTarget>(
@@ -73,12 +74,11 @@ impl TextBuilder {
         match &component.content {
             Content::Text { text } => text.to_string().into(),
             Content::Translate(message) => {
-                let translated = match resolutor.translate(&message.key) {
-                    Some(t) => t,
-                    None => match &message.fallback {
-                        Some(f) => return f.to_string().into(),
-                        None => return format!("[Translation: {}]", message.key).into(),
-                    },
+                let Some(translated) = resolutor.translate(&message.key) else {
+                    return match &message.fallback {
+                        Some(f) => f.to_string().into(),
+                        None => format!("[Translation: {}]", message.key).into(),
+                    };
                 };
                 let parts = resolutor.split_translation(translated);
                 let mut built_parts = vec![];
@@ -94,9 +94,7 @@ impl TextBuilder {
                             .to_string(),
                     );
                     if pos != 0
-                        && let Some(args) = &message.args
-                        && pos <= args.len()
-                        && let Some(arg) = args.get(pos - 1)
+                        && let Some(arg) = message.args.as_slice().get(pos - 1)
                     {
                         let arg_part = TextComponent {
                             content: arg.content.clone(),
@@ -109,18 +107,18 @@ impl TextBuilder {
                 }
                 built_parts.concat().into()
             }
-            Content::Keybind { keybind } => format!("[Keybind: {}]", keybind).into(),
-            Content::Object(Object::Atlas { sprite, .. }) => format!("[Object: {}]", sprite).into(),
+            Content::Keybind { keybind } => format!("[Keybind: {keybind}]").into(),
+            Content::Object(Object::Atlas { sprite, .. }) => format!("[Object: {sprite}]").into(),
             Content::Object(Object::Player { player, .. }) => {
                 if let Some(name) = &player.name {
-                    return format!("[Head: {}]", name).into();
+                    return format!("[Head: {name}]").into();
                 }
                 if let Some(id) = &player.id {
-                    return format!("[Head: {:?}]", id).into();
+                    return format!("[Head: {id:?}]").into();
                 }
                 String::from("[Head]").into()
             }
-            Content::Resolvable(_) => String::from("[Resolvable]").into(), // Just in case ;)
+            Content::Resolvable(_) => String::from("[Resolvable]").into(),
             #[cfg(feature = "custom")]
             Content::Custom { .. } => String::from("[Custom]").into(),
         }
@@ -143,6 +141,7 @@ impl BuildTarget for TextBuilder {
     }
 }
 
+/// Renders a component as colored terminal text.
 pub struct PrettyTextBuilder;
 impl BuildTarget for PrettyTextBuilder {
     type Result = ColoredString;
@@ -210,9 +209,10 @@ impl BuildTarget for PrettyTextBuilder {
             );
         }
         if supports_hyperlinks()
-            && let Some(ClickEvent::OpenUrl { url }) = &component.interactions.click
+            && let Some(click) = &component.interactions.click
+            && let ClickEvent::OpenUrl { url } = &**click
         {
-            final_text = format!("\x1b]8;;{}\x1b\\{}\x1b]8;;\x1b\\", url, final_text).into();
+            final_text = format!("\x1b]8;;{url}\x1b\\{final_text}\x1b]8;;\x1b\\").into();
         }
 
         format!(
@@ -238,9 +238,11 @@ impl BuildTarget for PrettyTextBuilder {
 }
 
 impl TextComponent {
+    /// The component as plain text.
     pub fn to_plain<R: TextResolutor + ?Sized>(&self, resolutor: &R) -> String {
         self.build(resolutor, TextBuilder)
     }
+    /// The component as colored terminal text.
     pub fn to_pretty<R: TextResolutor + ?Sized>(&self, resolutor: &R) -> ColoredString {
         self.build(resolutor, PrettyTextBuilder)
     }
@@ -249,7 +251,9 @@ impl TextComponent {
 static mut DISPLAY_RESOLUTOR: &dyn TextResolutor = &NoResolutor;
 static mut INITIALIZED: bool = false;
 
+/// Sets the resolutor the [`Display`] and [`Pointer`] impls use; only the first call takes effect.
 pub fn set_display_resolutor<T: TextResolutor>(resolutor: &'static T) {
+    // SAFETY: the `INITIALIZED` guard stores at most once, and the stored reference is `'static`.
     unsafe {
         if !INITIALIZED {
             DISPLAY_RESOLUTOR = resolutor;
@@ -260,14 +264,17 @@ pub fn set_display_resolutor<T: TextResolutor>(resolutor: &'static T) {
 
 impl Display for TextComponent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", unsafe { self.to_plain(DISPLAY_RESOLUTOR) })
+        // SAFETY: `DISPLAY_RESOLUTOR` only ever holds a `'static` reference, copied out by value.
+        let resolutor = unsafe { DISPLAY_RESOLUTOR };
+        write!(f, "{}", self.to_plain(resolutor))
     }
 }
 
-/// Clearly a Pointer, not 'p' because of pretty, OF COURSE
 impl Pointer for TextComponent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", unsafe { self.to_pretty(DISPLAY_RESOLUTOR) })
+        // SAFETY: `DISPLAY_RESOLUTOR` only ever holds a `'static` reference, copied out by value.
+        let resolutor = unsafe { DISPLAY_RESOLUTOR };
+        write!(f, "{}", self.to_pretty(resolutor))
     }
 }
 
@@ -319,23 +326,23 @@ impl Debug for Format {
         let mut items = vec![];
         if let Some(color) = &self.color {
             items.push(match color {
-                crate::format::Color::Aqua => " color: Aqua".to_string(),
-                crate::format::Color::Black => " color: Black".to_string(),
-                crate::format::Color::Blue => " color: Blue".to_string(),
-                crate::format::Color::DarkAqua => " color: Dark Aqua".to_string(),
-                crate::format::Color::DarkBlue => " color: Dark Blue".to_string(),
-                crate::format::Color::DarkGray => " color: Dark Gray".to_string(),
-                crate::format::Color::DarkGreen => " color: Dark Green".to_string(),
-                crate::format::Color::DarkPurple => " color: Dark Purple".to_string(),
-                crate::format::Color::DarkRed => " color: Dark Red".to_string(),
-                crate::format::Color::Gold => " color: Gold".to_string(),
-                crate::format::Color::Gray => " color: Gray".to_string(),
-                crate::format::Color::Green => " color: Green".to_string(),
-                crate::format::Color::LightPurple => " color: Light Purple".to_string(),
-                crate::format::Color::Red => " color: Red".to_string(),
-                crate::format::Color::White => " color: White".to_string(),
-                crate::format::Color::Yellow => " color: Yellow".to_string(),
-                crate::format::Color::Rgb(r, g, b) => format!(" color: [{r}, {g}, {b}]"),
+                Color::Aqua => " color: Aqua".to_string(),
+                Color::Black => " color: Black".to_string(),
+                Color::Blue => " color: Blue".to_string(),
+                Color::DarkAqua => " color: Dark Aqua".to_string(),
+                Color::DarkBlue => " color: Dark Blue".to_string(),
+                Color::DarkGray => " color: Dark Gray".to_string(),
+                Color::DarkGreen => " color: Dark Green".to_string(),
+                Color::DarkPurple => " color: Dark Purple".to_string(),
+                Color::DarkRed => " color: Dark Red".to_string(),
+                Color::Gold => " color: Gold".to_string(),
+                Color::Gray => " color: Gray".to_string(),
+                Color::Green => " color: Green".to_string(),
+                Color::LightPurple => " color: Light Purple".to_string(),
+                Color::Red => " color: Red".to_string(),
+                Color::White => " color: White".to_string(),
+                Color::Yellow => " color: Yellow".to_string(),
+                Color::Rgb(r, g, b) => format!(" color: [{r}, {g}, {b}]"),
             });
         }
         if let Some(font) = &self.font
