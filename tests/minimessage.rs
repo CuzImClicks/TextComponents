@@ -400,10 +400,10 @@ fn keybind_font_shadow_and_insertion() {
     assert_eq!(font.format.font.as_deref(), Some("minecraft:alt"));
     let shadow = parse("<shadow:#80FF0000>x</shadow>");
     assert_eq!(shadow.format.shadow_color, Some(0x80FF_0000_u32 as i32));
-    // no alpha given means fully opaque
+    // no alpha given means 25%
     assert_eq!(
         parse("<shadow:red>x</shadow>").format.shadow_color,
-        Some(0xFFFF_5555_u32 as i32)
+        Some(0x40FF_5555_u32 as i32)
     );
 
     let template = MiniMessage::new("<insertion:'/msg {name} '>{name}</insertion>").unwrap();
@@ -417,6 +417,165 @@ fn keybind_font_shadow_and_insertion() {
     assert_eq!(
         filled,
         text!("<insertion:'/msg {name} '>{name}</insertion>")
+    );
+}
+
+#[test]
+fn shadow_takes_an_alpha() {
+    assert_eq!(
+        parse("<shadow:red:0.5>x</shadow>").format.shadow_color,
+        Some(0x80FF_5555_u32 as i32)
+    );
+    assert_eq!(
+        parse("<shadow:#ff0000:0.5>x</shadow>").format.shadow_color,
+        Some(0x80FF_0000_u32 as i32)
+    );
+    assert_eq!(parse("<!shadow>x").format.shadow_color, Some(0));
+
+    assert_eq!(
+        parse("<shadow:red:0.5>x</shadow>"),
+        text!("<shadow:red:0.5>x</shadow>")
+    );
+    assert_eq!(parse("<!shadow>x"), text!("<!shadow>x"));
+
+    let err = MiniMessage::new("<shadow:red:2>x").unwrap_err();
+    assert!(
+        err.to_string().contains("not an alpha between 0 and 1"),
+        "{err}"
+    );
+}
+
+#[test]
+fn insert_is_the_canonical_insertion() {
+    let template = MiniMessage::new("<insert:'/msg {name} '>{name}</insert>").unwrap();
+    let filled = template.fill(&[("name", "Notch".into())]).unwrap();
+    assert_eq!(
+        filled.interactions.insertion.as_deref(),
+        Some("/msg Notch ")
+    );
+
+    let name = "Notch".to_string();
+    assert_eq!(filled, text!("<insert:'/msg {name} '>{name}</insert>"));
+    assert_eq!(
+        parse("<insert:'x'>a</insertion>"),
+        parse("<insertion:'x'>a</insertion>")
+    );
+    assert_eq!(
+        text!("<insert:'x'>a</insertion>"),
+        text!("<insertion:'x'>a</insert>")
+    );
+}
+
+#[test]
+fn tag_names_ignore_case() {
+    assert_eq!(parse("<RED>x</Red>"), parse("<red>x</red>"));
+    assert_eq!(parse("<C:blue>x</c>"), parse("<color:blue>x</color>"));
+    assert_eq!(parse("<colour:#00ff00>x"), parse("<color:#00ff00>x"));
+    assert_eq!(text!("<RED>x</Red>"), text!("<red>x</red>"));
+    assert_eq!(text!("<C:blue>x</C>"), text!("<blue>x</blue>"));
+
+    // a hole names a variable, so its case survives
+    let template = MiniMessage::new("<{Color}>x</{Color}>").unwrap();
+    assert_eq!(template.holes().collect::<Vec<_>>(), ["Color"]);
+    let filled = template.fill(&[("Color", Color::Aqua.into())]).unwrap();
+    assert_eq!(filled.format.color, Some(Color::Aqua));
+}
+
+#[test]
+fn arguments_take_either_quote() {
+    use text_components::interactivity::ClickEvent;
+
+    assert_eq!(
+        parse("<hover:show_text:\"hi\">x</hover>"),
+        parse("<hover:show_text:'hi'>x</hover>")
+    );
+    assert_eq!(
+        parse("<hover:show_text:\"hi\">x</hover>"),
+        text!("<hover:show_text:\"hi\">x</hover>")
+    );
+    assert_eq!(
+        parse("<hover:show_text:\"it's\">x</hover>"),
+        text!("<hover:show_text:\"it's\">x</hover>")
+    );
+
+    let filled = parse("<click:run_command:\"/say \\\"x\\\"\">go</click>");
+    match filled.interactions.click.as_deref() {
+        Some(ClickEvent::RunCommand { command }) => assert_eq!(command.as_ref(), "/say \"x\""),
+        other => panic!("expected run_command, got {other:?}"),
+    }
+    assert_eq!(
+        filled,
+        text!("<click:run_command:\"/say \\\"x\\\"\">go</click>")
+    );
+
+    let err = MiniMessage::new("<hover:show_text:\"a'>x").unwrap_err();
+    assert!(err.to_string().contains("unclosed `\"`"), "{err}");
+}
+
+#[test]
+fn self_closing_tags_take_no_content() {
+    assert_eq!(parse("<key:key.jump/>x"), parse("<key:key.jump>x"));
+    assert_eq!(text!("<key:key.jump/>x"), text!("<key:key.jump>x"));
+    assert_eq!(parse("<red/>x"), TextComponent::plain("x"));
+    assert_eq!(text!("<red/>x"), text!("x"));
+    assert_eq!(parse("a<newline/>b"), parse("a<br>b"));
+    assert_eq!(parse("<font:a/b>x").format.font.as_deref(), Some("a/b"));
+}
+
+#[test]
+fn lang_or_shows_a_fallback() {
+    use text_components::content::Content;
+
+    let filled = parse("<lang_or:my.key:'Fallback text'>");
+    match &filled.content {
+        Content::Translate(msg) => {
+            assert_eq!(msg.key.as_ref(), "my.key");
+            assert_eq!(msg.fallback.as_deref(), Some("Fallback text"));
+            assert!(msg.args.is_none());
+        }
+        other => panic!("expected a translation, got {other:?}"),
+    }
+    assert_eq!(filled, text!("<lang_or:my.key:'Fallback text'>"));
+
+    let template = MiniMessage::new("<tr_or:my.key:'Hi {name}':'{@arg}'>").unwrap();
+    assert_eq!(template.holes().collect::<Vec<_>>(), ["arg", "name"]);
+    let component = text!("<aqua>Notch</aqua>");
+    let filled = template
+        .fill(&[
+            ("name", "Notch".into()),
+            ("arg", Value::Component(component.clone())),
+        ])
+        .unwrap();
+
+    let name = "Notch".to_string();
+    let arg = component;
+    assert_eq!(filled, text!("<tr_or:my.key:'Hi {name}':'{@arg}'>"));
+
+    let err = MiniMessage::new("<lang_or:my.key>").unwrap_err();
+    assert!(err.to_string().contains("needs a fallback"), "{err}");
+}
+
+#[test]
+fn click_show_dialog_references_a_dialog() {
+    use text_components::interactivity::{ClickEvent, Dialog};
+
+    let filled = parse("<click:show_dialog:'steel:menu'>open</click>");
+    match filled.interactions.click.as_deref() {
+        Some(ClickEvent::ShowDialog {
+            dialog: Dialog::Reference(id),
+        }) => assert_eq!(id.as_ref(), "steel:menu"),
+        other => panic!("expected show_dialog, got {other:?}"),
+    }
+    assert_eq!(
+        filled,
+        text!("<click:show_dialog:'steel:menu'>open</click>")
+    );
+
+    let template = MiniMessage::new("<click:show_dialog:'{id}'>open</click>").unwrap();
+    let filled = template.fill(&[("id", "steel:menu".into())]).unwrap();
+    assert_eq!(
+        filled,
+        text!("<click:show_dialog:'steel:menu'>open</click>")
     );
 }
 
@@ -609,6 +768,10 @@ mod nbt_parity {
 
         parity!("<gold><b>Steel</b></gold><gray> dev build</gray>");
         parity!("<gray>Press </gray><key:key.jump><gray> to fly</gray>");
+        parity!("<lang_or:my.key:'Fallback text'>");
+        parity!("<click:show_dialog:'steel:menu'>open</click>");
+        parity!("<shadow:red:0.5>dim</shadow><!shadow>plain");
+        parity!("<insert:'/msg Notch '>x</insert>");
         parity!(
             "<green><hover:show_text:'<yellow>Guild: Steel'>\
              <click:suggest_command:'/guild info Steel'>[STEEL] </click></hover></green>"
@@ -672,6 +835,54 @@ mod nbt_parity {
                 with_who()
             );
         }
+        {
+            let name = "Notch".to_string();
+            let arg = styled.clone();
+            parity!(
+                "<tr_or:my.key:'Hi {name}':'{@arg}'>",
+                [
+                    ("name", Value::Text("Notch".to_string())),
+                    ("arg", Value::Component(styled.clone())),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn lang_or_fallback_byte_parity() {
+        const GREETING: EncodedComponent = text_nbt!("<lang_or:my.key:'Fallback text'>");
+
+        let tree = text!("<lang_or:my.key:'Fallback text'>");
+        assert_eq!(reference_bytes(&tree), wrap_mine(GREETING.as_bytes()));
+        let runtime = MiniMessage::new("<lang_or:my.key:'Fallback text'>")
+            .unwrap()
+            .fill_nbt(&[])
+            .unwrap();
+        assert_eq!(GREETING, runtime);
+
+        let who = text!("<aqua>Notch</aqua>");
+        let name = "Notch".to_string();
+        let arg = who.clone();
+        let mine = text_nbt!("<tr_or:my.key:'Hi {name}':'{@arg}'>");
+        let arg = who;
+        let tree = text!("<tr_or:my.key:'Hi {name}':'{@arg}'>");
+        assert_eq!(reference_bytes(&tree), wrap_mine(mine.as_bytes()));
+    }
+
+    #[test]
+    fn show_dialog_byte_parity() {
+        let tree = text!("<click:show_dialog:'steel:menu'>open</click>");
+        let mine = text_nbt!("<click:show_dialog:'steel:menu'>open</click>");
+        assert_eq!(reference_bytes(&tree), wrap_mine(mine.as_bytes()));
+
+        let template = MiniMessage::new("<click:show_dialog:'{id}'>open</click>").unwrap();
+        let values: Vec<(&str, Value)> = vec![("id", "steel:menu".into())];
+        let runtime_bytes = template.fill_nbt(&values).unwrap();
+        assert_eq!(runtime_bytes, mine, "fill_nbt == text_nbt!");
+        assert_eq!(
+            reference_bytes(&template.fill(&values).unwrap()),
+            wrap_mine(runtime_bytes.as_bytes())
+        );
     }
 
     #[test]

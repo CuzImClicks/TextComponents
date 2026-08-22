@@ -1,5 +1,5 @@
 //! Parse a `MiniMessage` template at run time, from a config file or another
-//! data source, then fill the placeholders.
+//! data source, then fill the placeholders. The tags are the same ones `text!` uses.
 
 #[cfg(feature = "nbt")]
 use crate::{
@@ -189,6 +189,29 @@ fn lookup<'v>(values: &'v [(&str, Value)], name: &str) -> Result<&'v Value, Erro
         })
 }
 
+/// Joins literal runs and filled holes into one string value.
+fn resolve_string(segs: &[StrSeg], what: &str, values: &[(&str, Value)]) -> Result<String, Error> {
+    let mut value = String::new();
+    for seg in segs {
+        match seg {
+            StrSeg::Lit(lit) => value.push_str(lit),
+            StrSeg::Hole(arg, _) => {
+                let name = hole_name(arg);
+                match lookup(values, name)? {
+                    Value::Text(s) => value.push_str(s),
+                    other => {
+                        return Err(Error::fill(format!(
+                            "{what} hole `{{{name}}}` needs a text value, got {}",
+                            other.kind_name()
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
 #[cfg(feature = "nbt")]
 fn patch_str_len(buf: &mut [u8], at: usize) -> Result<(), Error> {
     let n = u16::try_from(buf.len() - at - 2)
@@ -250,9 +273,22 @@ impl MiniMessage {
                 if let Piece::Hole { arg, .. } = piece {
                     out.push(hole_name(arg));
                 }
-                if let Piece::Lang { key, args, .. } = piece {
+                if let Piece::Lang {
+                    key,
+                    fallback,
+                    args,
+                    ..
+                } = piece
+                {
                     if let LangKey::Dyn(arg) = key {
                         out.push(hole_name(arg));
+                    }
+                    if let Some(segs) = fallback {
+                        for seg in segs {
+                            if let StrSeg::Hole(arg, _) = seg {
+                                out.push(hole_name(arg));
+                            }
+                        }
                     }
                     for arg in args {
                         collect(arg, out);
@@ -502,7 +538,11 @@ impl MiniMessage {
                 Self::apply_style(component, style, values, false)
             }
             Piece::Lang {
-                key, args, style, ..
+                key,
+                fallback,
+                args,
+                style,
+                ..
             } => {
                 let key = match key {
                     LangKey::Lit(key) => key.clone(),
@@ -519,13 +559,17 @@ impl MiniMessage {
                         }
                     }
                 };
+                let fallback = match fallback {
+                    Some(segs) => Some(resolve_string(segs, "fallback", values)?.into_boxed_str()),
+                    None => None,
+                };
                 let mut translated = Vec::with_capacity(args.len());
                 for arg in args {
                     translated.push(Self::fill_pieces(arg, values)?);
                 }
                 let component = TextComponent::translated(TranslatedMessage {
                     key: Cow::Owned(key),
-                    fallback: None,
+                    fallback,
                     args: if translated.is_empty() {
                         crate::Args::None
                     } else {
@@ -650,30 +694,8 @@ impl MiniMessage {
             component.format.shadow_color = Some(shadow);
         }
 
-        let resolve_string = |segs: &[StrSeg], what: &str| -> Result<String, Error> {
-            let mut value = String::new();
-            for seg in segs {
-                match seg {
-                    StrSeg::Lit(lit) => value.push_str(lit),
-                    StrSeg::Hole(arg, _) => {
-                        let name = hole_name(arg);
-                        match lookup(values, name)? {
-                            Value::Text(s) => value.push_str(s),
-                            other => {
-                                return Err(Error::fill(format!(
-                                    "{what} hole `{{{name}}}` needs a text value, got {}",
-                                    other.kind_name()
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-            Ok(value)
-        };
-
         if let Some(segs) = &style.insertion {
-            let value = resolve_string(segs, "insertion")?;
+            let value = resolve_string(segs, "insertion", values)?;
             if !fill_if_unset || component.interactions.insertion.is_none() {
                 component.interactions.insertion = Some(Cow::Owned(value));
             }
@@ -715,7 +737,7 @@ impl MiniMessage {
                     }
                 }
                 ClickIr::Action(kind, segs) => {
-                    let value = resolve_string(segs, "click")?;
+                    let value = resolve_string(segs, "click", values)?;
                     match kind {
                         ClickKind::OpenUrl => ClickEvent::open_url(value),
                         ClickKind::RunCommand => ClickEvent::run_command(value),
@@ -724,6 +746,7 @@ impl MiniMessage {
                             value: Cow::Owned(value),
                         },
                         ClickKind::ChangePage(page) => ClickEvent::ChangePage { page: *page },
+                        ClickKind::ShowDialog => ClickEvent::show_dialog(value),
                     }
                 }
             };

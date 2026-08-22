@@ -68,9 +68,17 @@ pub(crate) fn walk_holes(pieces: &[Piece], visit: &mut impl FnMut(&HoleArg, Usag
                     HoleKind::Text => Usage::Borrow,
                 },
             ),
-            Piece::Lang { key, args, .. } => {
+            Piece::Lang {
+                key,
+                fallback,
+                args,
+                ..
+            } => {
                 if let LangKey::Dyn(arg) = key {
                     visit(arg, Usage::Borrow);
+                }
+                if let Some(segs) = fallback {
+                    walk_segs(segs, visit);
                 }
                 for arg in args {
                     walk_holes(arg, visit);

@@ -39,6 +39,7 @@ pub(crate) fn all_tag_names() -> impl Iterator<Item = &'static str> {
         "hover",
         "click",
         "font",
+        "insert",
         "insertion",
         "shadow",
         "shadow_color",
@@ -47,16 +48,22 @@ pub(crate) fn all_tag_names() -> impl Iterator<Item = &'static str> {
         "lang",
         "tr",
         "translate",
+        "lang_or",
+        "tr_or",
+        "translate_or",
+        "color",
+        "colour",
+        "c",
         "gradient",
         "rainbow",
     ])
 }
 
 pub(crate) const SUPPORTED_SUMMARY: &str = "supported tags: named colors (<red>, <dark_gray>, …), <#RRGGBB>, \
-     <b>/<i>/<u>/<st>/<obf>, <reset>, <newline>, <font:…>, <shadow:#AARRGGBB>, \
-     <key:key.jump>, <lang:key:'arg'>, <gradient:#a:#b>, <rainbow>, \
-     <insertion:'…'>, <hover:show_text:'…'>, <click:run_command:'…'> (and \
-     open_url, suggest_command, copy_to_clipboard, change_page)";
+     <b>/<i>/<u>/<st>/<obf>, <reset>, <newline>, <font:…>, <shadow:red:0.5>, \
+     <key:key.jump>, <lang:key:'arg'>, <lang_or:key:'fallback'>, <gradient:#a:#b>, \
+     <rainbow>, <insert:'…'>, <hover:show_text:'…'>, <click:run_command:'…'> (and \
+     open_url, suggest_command, copy_to_clipboard, change_page, show_dialog)";
 
 pub(crate) const COLOR_HELP: &str = "for example <color:red> or <color:#ff0000>";
 
@@ -69,7 +76,10 @@ pub(crate) fn canonical_tag(name: &str) -> String {
         "obf" => "obfuscated".into(),
         "shadow_color" => "shadow".into(),
         "keybind" => "key".into(),
+        "insertion" => "insert".into(),
+        "c" | "colour" => "color".into(),
         "tr" | "translate" => "lang".into(),
+        "tr_or" | "translate_or" => "lang_or".into(),
         n if n.starts_with('#') || n.starts_with('{') => "color".into(),
         n => NAMED_COLORS
             .iter()

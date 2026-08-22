@@ -67,6 +67,7 @@ pub enum ClickKind {
     SuggestCommand,
     CopyToClipboard,
     ChangePage(i32),
+    ShowDialog,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -174,6 +175,8 @@ pub enum Piece {
     /// `<lang:key:arg:arg>` — a translation the client resolves, each arg its own template.
     Lang {
         key: LangKey,
+        /// `<lang_or:key:'text':arg>`
+        fallback: Option<Vec<StrSeg>>,
         args: Vec<Vec<Piece>>,
         style: Style,
         range: (usize, usize),
@@ -195,9 +198,14 @@ impl Piece {
         match self {
             Piece::Hole { .. } => true,
             Piece::Lang {
-                key, args, style, ..
+                key,
+                fallback,
+                args,
+                style,
+                ..
             } => {
                 matches!(key, LangKey::Dyn(_))
+                    || fallback.is_some() // TODO: make fallback const
                     || args.iter().any(|arg| pieces_have_dyn(arg))
                     || style.has_dyn()
             }

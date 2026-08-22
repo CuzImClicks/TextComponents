@@ -284,7 +284,12 @@ impl NbtEmitter {
         Ok(())
     }
 
-    fn lang_content(&mut self, key: &LangKey, args: &[Vec<Piece>]) -> Result<(), EmitError> {
+    fn lang_content(
+        &mut self,
+        key: &LangKey,
+        fallback: Option<&Vec<StrSeg>>,
+        args: &[Vec<Piece>],
+    ) -> Result<(), EmitError> {
         self.entry(TAG_STRING, "translate")?;
         match key {
             LangKey::Lit(k) => self.mutf8(k)?,
@@ -292,6 +297,9 @@ impl NbtEmitter {
                 arg: arg.clone(),
                 arity: args.len(),
             }),
+        }
+        if let Some(segs) = fallback {
+            self.str_value("fallback", segs)?;
         }
         if args.is_empty() {
             return Ok(());
@@ -347,7 +355,12 @@ impl NbtEmitter {
         self.at = Some(piece.range());
         match piece {
             Piece::Keybind { key, .. } => self.string_entry("keybind", key)?,
-            Piece::Lang { key, args, .. } => self.lang_content(key, args)?,
+            Piece::Lang {
+                key,
+                fallback,
+                args,
+                ..
+            } => self.lang_content(key, fallback.as_ref(), args)?,
             _ => {
                 self.entry(TAG_STRING, "text")?;
                 self.bare_payload(piece)?;
@@ -441,6 +454,7 @@ impl NbtEmitter {
                     ClickKind::SuggestCommand => ("suggest_command", "command"),
                     ClickKind::CopyToClipboard => ("copy_to_clipboard", "value"),
                     ClickKind::ChangePage(_) => ("change_page", "page"),
+                    ClickKind::ShowDialog => ("show_dialog", "dialog"),
                 };
                 self.string_entry("action", action)?;
                 if let ClickKind::ChangePage(page) = kind {

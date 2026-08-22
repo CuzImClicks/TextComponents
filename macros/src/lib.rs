@@ -43,28 +43,31 @@ mod parse;
 ///
 /// # Tags
 ///
-/// - Colors: the vanilla names `<red>`, `<dark_gray>`, ... (`grey` and
-///   `dark_grey` are accepted), `<#RRGGBB>`, `<color:red>`, `<color:#ff0000>`.
-/// - Formatting: `<b>`/`<bold>`, `<i>`/`<em>`/`<italic>`, `<u>`/`<underlined>`,
-///   `<st>`/`<strikethrough>`, `<obf>`/`<obfuscated>`
-/// - `<font:minecraft:uniform>`.
-/// - `<shadow:#AARRGGBB>`, also `#RRGGBB` or a color name, both opaque.
-/// - `<gradient:red:#f79459>` with two or more stops, and `<rainbow>`. Both
-///   apply per character across the enclosed text.
+/// Tag names are case-insensitive; arguments and hole names keep their case.
+///
+/// - Colors: the vanilla names `<red>`, `<dark_gray>`, ... , `<#RRGGBB>`, `<color:red>`, `<color:#ff0000>`
+/// - Formatting: `<bold>`, `<italic>`, `<underlined>`,
+///   `<strikethrough>`, `<obfuscated>`
+/// - `<font:minecraft:uniform>`
+/// - `<shadow:#AARRGGBB>`, `<shadow:red:0.5>` also `#RRGGBB` or a color name. `<!shadow>` turns it off
+/// - `<gradient:red:#f79459>` with two or more stops, and `<rainbow>`
 /// - `<hover:show_text:'...'>`
 /// - `<click:open_url:'...'>`, `<click:run_command:'...'>`,
 ///   `<click:suggest_command:'...'>`, `<click:copy_to_clipboard:'...'>`,
-///   `<click:change_page:'3'>` (an integer, no holes)
-/// - `<insertion:'...'>`
+///   `<click:change_page:'3'>` (an integer, no holes),
+///   `<click:show_dialog:'namespace:id'>`
+/// - `<insert:'...'>`, `<insertion:'...'>`
 /// - `<key:key.jump>`
 /// - `<lang:key:'arg':'arg'>`
-/// - `<newline>` and `<br>` insert `\n`.
-/// - `<reset>` closes every open tag.
+/// - `<lang_or:key:'fallback':'arg'>`, the fallback is shown when the client doesn't know that translation
+/// - `<newline>`, `<br>` insert `\n`
+/// - `<reset>` closes every open tag
+/// - `<tag/>` closes itself right away
 /// - Tag arguments are separated by `:`. An argument that contains `:` or `>`
-///   must be single-quoted: `'...'`. Inside quotes, write `\'` for a literal
-///   quote.
+///   must be quoted: `'...'` or `"..."`. Inside quotes, write `\'` (or `\"`)
+///   for a literal quote of the kind that opened the argument.
 /// - Escapes: `\<` for a literal `<`, `\\` for a backslash, `{{` and `}}` for
-///   literal braces. In a normal Rust string literal, `\<` is written `"\\<"`.
+///   literal braces.
 #[proc_macro]
 pub fn text(input: TokenStream) -> TokenStream {
     expand::text(input)

@@ -242,6 +242,14 @@ impl Codegen {
                     ClickKind::SuggestCommand => (quote!(SuggestCommand), quote!(command)),
                     ClickKind::CopyToClipboard => (quote!(CopyToClipboard), quote!(value)),
                     ClickKind::ChangePage(_) => (quote!(ChangePage), quote!(page)),
+                    ClickKind::ShowDialog => (quote!(ShowDialog), quote!(dialog)),
+                };
+                // dialog is referenced by id
+                let payload = |value: Ts| match kind {
+                    ClickKind::ShowDialog => {
+                        quote!(::text_components::interactivity::Dialog::Reference(#value))
+                    }
+                    _ => value,
                 };
                 if let ClickKind::ChangePage(page) = kind {
                     let event = quote!(::text_components::interactivity::ClickEvent::ChangePage {
@@ -255,8 +263,9 @@ impl Codegen {
                         ::text_components::interactivity::MaybeStatic::Static(&#id)
                     ))
                 } else if let Some(value) = StrSeg::join_lits(segs) {
+                    let value = payload(quote!(::std::borrow::Cow::Borrowed(#value)));
                     let event = quote!(::text_components::interactivity::ClickEvent::#variant {
-                        #field: ::std::borrow::Cow::Borrowed(#value)
+                        #field: #value
                     });
                     let id = self.fresh("CLICK");
                     self.statics.push(quote! {
@@ -267,11 +276,12 @@ impl Codegen {
                     ))
                 } else {
                     let value = self.str_splice_expr(segs);
+                    let value = payload(quote!(::std::borrow::Cow::Owned(#value)));
                     quote!(::core::option::Option::Some(
                         ::text_components::interactivity::MaybeStatic::Owned(
                             ::std::boxed::Box::new(
                                 ::text_components::interactivity::ClickEvent::#variant {
-                                    #field: ::std::borrow::Cow::Owned(#value),
+                                    #field: #value,
                                 }
                             )
                         )
@@ -366,6 +376,7 @@ impl Codegen {
             Piece::Text { text, .. } => self.leaf_tokens(text, style),
             Piece::Lang {
                 key: LangKey::Lit(key),
+                fallback: None,
                 args,
                 ..
             } => {
@@ -583,7 +594,11 @@ impl Codegen {
 
     pub(crate) fn lang_tokens(&mut self, piece: &Piece) -> Ts {
         let Piece::Lang {
-            key, args, style, ..
+            key,
+            fallback,
+            args,
+            style,
+            ..
         } = piece
         else {
             unreachable!("lang_tokens only takes lang pieces");
@@ -599,6 +614,16 @@ impl Codegen {
                     >::borrow(#e)
                     .0
                 ))
+            }
+        };
+        let fallback_expr = match fallback {
+            None => quote!(::core::option::Option::None),
+            Some(segs) => {
+                let value = match StrSeg::join_lits(segs) {
+                    Some(lit) => quote!(#lit),
+                    None => self.str_splice_expr(segs),
+                };
+                quote!(::core::option::Option::Some(::std::boxed::Box::<str>::from(#value)))
             }
         };
         let args_expr = if args.is_empty() {
@@ -617,7 +642,7 @@ impl Codegen {
                     ::text_components::TextComponent::translated(
                         ::text_components::translation::TranslatedMessage {
                             key: #key_expr,
-                            fallback: ::core::option::Option::None,
+                            fallback: #fallback_expr,
                             args: #args_expr,
                         }
                     );

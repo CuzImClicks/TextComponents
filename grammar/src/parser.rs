@@ -59,6 +59,13 @@ struct Parser<'a> {
 /// Which argument fills a hole, what it takes, its optional `format!` spec, and its range.
 type ParsedHole = (HoleArg, HoleKind, Option<String>, (usize, usize));
 
+/// One `<…>` tag as read from the template.
+struct ParsedTag {
+    parts: Vec<TagArg>,
+    range: (usize, usize),
+    self_closing: bool,
+}
+
 struct TagArg {
     text: String,
     range: (usize, usize),
@@ -67,8 +74,15 @@ struct TagArg {
 enum ArgState {
     Fresh,
     Unquoted,
-    Quoted { open: usize, content_start: usize },
-    Closed((usize, usize)),
+    Quoted {
+        quote: char,
+        open: usize,
+        content_start: usize,
+    },
+    Closed {
+        quote: char,
+        range: (usize, usize),
+    },
 }
 
 struct GradMark {
@@ -115,6 +129,15 @@ impl Ctx {
             apply_gradient(&mut self.pieces, &mark);
         }
     }
+
+    /// Closes the tag at `idx` and everything opened after it.
+    fn close_at(&mut self, idx: usize) {
+        let restored = self.stack[idx].1.clone();
+        self.flush();
+        self.close_gradients(idx);
+        self.stack.truncate(idx);
+        self.style = restored;
+    }
 }
 
 impl Parser<'_> {
@@ -147,8 +170,12 @@ impl Parser<'_> {
                     });
                 }
                 '<' => {
-                    let (parts, range) = self.read_tag()?;
-                    self.apply_tag(&parts, range, &mut ctx)?;
+                    let tag = self.read_tag()?;
+                    let depth = ctx.stack.len();
+                    self.apply_tag(&tag.parts, tag.range, &mut ctx)?;
+                    if tag.self_closing && ctx.stack.len() > depth {
+                        ctx.close_at(depth);
+                    }
                 }
                 c => {
                     ctx.push_text(c, self.span(1));
@@ -280,26 +307,35 @@ impl Parser<'_> {
         }
     }
 
-    /// `parts[0]` is the tag head; an argument is either fully unquoted or one `'…'` span.
-    fn read_tag(&mut self) -> Result<(Vec<TagArg>, (usize, usize)), ParseError> {
+    /// `parts[0]` is the tag head; an argument is either fully unquoted or one `'…'` / `"…"` span.
+    /// The flag reports a self-closing `<tag/>`.
+    fn read_tag(&mut self) -> Result<ParsedTag, ParseError> {
         let open = self.offset + self.pos;
         self.pos += 1;
         let mut parts: Vec<TagArg> = Vec::new();
         let mut text = String::new();
         let mut arg_start = self.pos;
         let mut state = ArgState::Fresh;
+        let mut self_closing = false;
 
         while self.pos < self.chars.len() {
             let c = self.chars[self.pos];
-            if let ArgState::Quoted { content_start, .. } = state {
+            if let ArgState::Quoted {
+                quote,
+                content_start,
+                ..
+            } = state
+            {
                 match c {
-                    '\\' if matches!(self.peek(1), Some('\'' | '\\')) => {
+                    '\\' if matches!(self.peek(1), Some(next) if next == quote || next == '\\') => {
                         text.push(self.chars[self.pos + 1]);
                         self.pos += 2;
                     }
-                    '\'' => {
-                        state =
-                            ArgState::Closed((self.offset + content_start, self.offset + self.pos));
+                    c if c == quote => {
+                        state = ArgState::Closed {
+                            quote,
+                            range: (self.offset + content_start, self.offset + self.pos),
+                        };
                         self.pos += 1;
                     }
                     c => {
@@ -312,7 +348,7 @@ impl Parser<'_> {
             match c {
                 ':' | '>' => {
                     let range = match state {
-                        ArgState::Closed(range) => range,
+                        ArgState::Closed { range, .. } => range,
                         _ => (self.offset + arg_start, self.offset + self.pos),
                     };
                     parts.push(TagArg {
@@ -321,29 +357,33 @@ impl Parser<'_> {
                     });
                     self.pos += 1;
                     if c == '>' {
-                        return Ok((parts, (open, self.offset + self.pos)));
+                        return Ok(ParsedTag {
+                            parts,
+                            range: (open, self.offset + self.pos),
+                            self_closing,
+                        });
                     }
                     arg_start = self.pos;
                     state = ArgState::Fresh;
                 }
-                '\'' if matches!(state, ArgState::Fresh) => {
+                '/' if self.peek(1) == Some('>') => {
+                    self_closing = true;
+                    self.pos += 1;
+                }
+                '\'' | '"' if matches!(state, ArgState::Fresh) => {
                     state = ArgState::Quoted {
+                        quote: c,
                         open: self.pos,
                         content_start: self.pos + 1,
                     };
                     self.pos += 1;
                 }
                 _ => {
-                    if matches!(state, ArgState::Closed(_)) || c == '\'' {
-                        let at = self.offset + self.pos;
-                        return Err(ParseError::new(
-                            (at, at + 1),
-                            "a quoted value must span the whole argument",
-                        )
-                        .help(
-                            "a `'` either opens the whole argument or is written `\\'` for a \
-                             literal quote inside a quoted value",
-                        ));
+                    if let ArgState::Closed { quote, .. } = state {
+                        return Err(self.stray_quote(quote));
+                    }
+                    if c == '\'' || c == '"' {
+                        return Err(self.stray_quote(c));
                     }
                     state = ArgState::Unquoted;
                     text.push(c);
@@ -352,17 +392,28 @@ impl Parser<'_> {
             }
         }
 
-        if let ArgState::Quoted { open, .. } = state {
+        if let ArgState::Quoted { quote, open, .. } = state {
             let at = self.offset + open;
-            return Err(
-                ParseError::new((at, at + 1), "unclosed `'` inside this tag")
-                    .help("close the quoted value, e.g. <hover:show_text:'Hello'>"),
-            );
+            return Err(ParseError::new(
+                (at, at + 1),
+                format!("unclosed `{quote}` inside this tag"),
+            )
+            .help(format!(
+                "close the quoted value, e.g. <hover:show_text:{quote}Hello{quote}>"
+            )));
         }
         Err(
             ParseError::new((open, self.offset + self.chars.len()), "unclosed `<` tag")
                 .help("close the tag with `>`, or escape a literal `<` as `\\<`"),
         )
+    }
+
+    fn stray_quote(&self, quote: char) -> ParseError {
+        let at = self.offset + self.pos;
+        ParseError::new((at, at + 1), "a quoted value must span the whole argument").help(format!(
+            "a `{quote}` either opens the whole argument or is written `\\{quote}` for a \
+             literal quote inside a quoted value"
+        ))
     }
 
     #[expect(
@@ -375,7 +426,13 @@ impl Parser<'_> {
         range: (usize, usize),
         ctx: &mut Ctx,
     ) -> Result<(), ParseError> {
-        let head = parts[0].text.as_str();
+        let raw_head = parts[0].text.as_str();
+        let lowered = raw_head.to_ascii_lowercase();
+        let head = if raw_head.starts_with('{') {
+            raw_head
+        } else {
+            lowered.as_str()
+        };
         let args = &parts[1..];
 
         if let Some(name) = head.strip_prefix('/').filter(|_| args.is_empty()) {
@@ -400,12 +457,7 @@ impl Parser<'_> {
                 )
                 .help(help));
             };
-            // MiniMessage auto-closes inner tags, so everything above `idx` goes too
-            let restored = ctx.stack[idx].1.clone();
-            ctx.flush();
-            ctx.close_gradients(idx);
-            ctx.stack.truncate(idx);
-            ctx.style = restored;
+            ctx.close_at(idx);
             return Ok(());
         }
 
@@ -451,12 +503,12 @@ impl Parser<'_> {
             canonical.as_str(),
             "bold" | "italic" | "underlined" | "strikethrough" | "obfuscated"
         );
-        if negated && !is_flag {
+        if negated && !is_flag && canonical != "shadow" {
             return Err(ParseError::new(
                 range,
-                format!("`<!{name}>` — only formatting flags can be negated"),
+                format!("`<!{name}>` — only formatting flags and the shadow can be negated"),
             )
-            .help("negation works on b/i/u/st/obf, e.g. <!bold>"));
+            .help("negation works on b/i/u/st/obf and shadow, e.g. <!bold>"));
         }
         if is_flag {
             let value = if negated {
@@ -504,8 +556,8 @@ impl Parser<'_> {
                 });
                 return Ok(());
             }
-            "lang" => {
-                let [key, lang_args @ ..] = args else {
+            "lang" | "lang_or" => {
+                let [key, rest @ ..] = args else {
                     return Err(ParseError::new(range, "`<lang:…>` needs a translation key")
                         .help("for example <lang:multiplayer.player.left:'{@}'>"));
                 };
@@ -530,6 +582,18 @@ impl Parser<'_> {
                 } else {
                     LangKey::Lit(key.text.clone())
                 };
+                let (fallback, lang_args) = if canonical == "lang_or" {
+                    let [fallback, lang_args @ ..] = rest else {
+                        return Err(ParseError::new(range, "`<lang_or:…>` needs a fallback")
+                            .help("for example <lang_or:my.key:'Fallback text'>"));
+                    };
+                    (
+                        Some(self.parse_str_segments(&fallback.text, fallback.range.0)?),
+                        lang_args,
+                    )
+                } else {
+                    (None, rest)
+                };
                 let mut parsed_args = Vec::with_capacity(lang_args.len());
                 for arg in lang_args {
                     parsed_args.push(
@@ -546,6 +610,7 @@ impl Parser<'_> {
                 ctx.flush();
                 ctx.pieces.push(Piece::Lang {
                     key,
+                    fallback,
                     args: parsed_args,
                     style: ctx.style.clone(),
                     range,
@@ -613,23 +678,37 @@ impl Parser<'_> {
                 }
                 new.font = Some(font);
             }
-            "shadow" => {
-                let [value] = args else {
-                    return Err(
-                        ParseError::new(range, "`<shadow:…>` takes exactly one color").help(
-                            "for example <shadow:#80000000> (ARGB) or <shadow:#000000> (opaque)",
-                        ),
-                    );
-                };
-                new.shadow_color = Some(parse_shadow(&value.text, value.range)?);
+            "shadow" if negated => {
+                if !args.is_empty() {
+                    return Err(ParseError::new(range, "`<!shadow:...>` can't take a value")
+                        .help("write <!shadow> to turn the shadow off"));
+                }
+                new.shadow_color = Some(0);
             }
-            "insertion" => {
+            "shadow" => {
+                let (value, alpha) = match args {
+                    [value] => (value, None),
+                    [value, alpha] => (value, Some(alpha)),
+                    _ => {
+                        return Err(ParseError::new(
+                            range,
+                            "`<shadow:…>` takes a color and an optional alpha",
+                        )
+                        .help(
+                            "for example <shadow:#80000000> (ARGB), <shadow:red> or \
+                             <shadow:red:0.5>",
+                        ));
+                    }
+                };
+                new.shadow_color = Some(parse_shadow(value, alpha)?);
+            }
+            "insert" => {
                 let [value] = args else {
                     return Err(ParseError::new(
                         range,
-                        "`<insertion:…>` takes exactly one quoted value",
+                        "`<insert:…>` takes exactly one quoted value",
                     )
-                    .help("for example <insertion:'/msg {name} '>"));
+                    .help("for example <insert:'/msg {name} '>"));
                 };
                 new.insertion = Some(self.parse_str_segments(&value.text, value.range.0)?);
             }
@@ -671,12 +750,13 @@ impl Parser<'_> {
                 new.click = Some(ClickIr::Dyn(self.event_hole_arg(&args[0])?));
             }
             "click" => {
-                const ACTIONS: [&str; 5] = [
+                const ACTIONS: [&str; 6] = [
                     "open_url",
                     "run_command",
                     "suggest_command",
                     "copy_to_clipboard",
                     "change_page",
+                    "show_dialog",
                 ];
                 let [action, value] = expect_args(name, args, range)?;
                 let segs = self.parse_str_segments(&value.text, value.range.0)?;
@@ -699,6 +779,7 @@ impl Parser<'_> {
                     "run_command" => ClickKind::RunCommand,
                     "suggest_command" => ClickKind::SuggestCommand,
                     "copy_to_clipboard" => ClickKind::CopyToClipboard,
+                    "show_dialog" => ClickKind::ShowDialog,
                     "change_page" => {
                         let Some(page) = &all_lit else {
                             return Err(ParseError::new(range, "change_page can't take holes")
@@ -916,23 +997,39 @@ fn parse_stop(value: &str, range: (usize, usize)) -> Result<(u8, u8, u8), ParseE
         })
 }
 
-/// `#AARRGGBB`, `#RRGGBB` (opaque) or a named color, packed as the codec stores shadows.
-fn parse_shadow(value: &str, range: (usize, usize)) -> Result<i32, ParseError> {
-    if let Some(hex) = value.strip_prefix('#')
+/// `#AARRGGBB`, `#RRGGBB` or a named color with an optional `0..1` alpha. `#RRGGBB` and named colors take `0.25` by default.
+fn parse_shadow(value: &TagArg, alpha: Option<&TagArg>) -> Result<i32, ParseError> {
+    let mut argb = if let Some(hex) = value.text.strip_prefix('#')
         && hex.len() == 8
     {
         if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(
-                ParseError::new(range, format!("`#{hex}` is not a valid shadow color"))
-                    .help("shadow colors are <shadow:#AARRGGBB> or <shadow:#RRGGBB>"),
-            );
+            return Err(ParseError::new(
+                value.range,
+                format!("`#{hex}` is not a valid shadow color"),
+            )
+            .help("shadow colors are <shadow:#AARRGGBB> or <shadow:#RRGGBB>"));
         }
-        return Ok(
-            u32::from_str_radix(hex, 16).expect("eight ascii hex digits checked above") as i32,
-        );
+        u32::from_str_radix(hex, 16).expect("eight ascii hex digits checked above")
+    } else {
+        let (r, g, b) = parse_stop(&value.text, value.range)?;
+        0x4000_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
+    };
+    if let Some(alpha) = alpha {
+        let fraction: f32 = alpha.text.parse().map_err(|_| alpha_error(alpha))?;
+        if !(0.0..=1.0).contains(&fraction) {
+            return Err(alpha_error(alpha));
+        }
+        argb = (argb & 0x00FF_FFFF) | ((fraction * 255.0).round() as u32) << 24;
     }
-    let (r, g, b) = parse_stop(value, range)?;
-    Ok((0xFF00_0000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)) as i32)
+    Ok(argb as i32)
+}
+
+fn alpha_error(alpha: &TagArg) -> ParseError {
+    ParseError::new(
+        alpha.range,
+        format!("`{}` is not an alpha between 0 and 1", alpha.text),
+    )
+    .help("the shadow alpha is a fraction: <shadow:red:0.5>")
 }
 
 impl GradMark {

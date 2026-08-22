@@ -195,3 +195,144 @@ fn open_tags_close_at_the_end() {
         pieces("<red>x</red>", Mode::Runtime)
     );
 }
+
+fn shadow_of(input: &str) -> Option<i32> {
+    pieces(input, Mode::Runtime)[0].style().shadow_color
+}
+
+#[test]
+fn shadow_alpha_defaults_to_a_quarter() {
+    assert_eq!(shadow_of("<shadow:red>x"), Some(0x40FF_5555_u32 as i32));
+    assert_eq!(shadow_of("<shadow:#ff0000>x"), Some(0x40FF_0000_u32 as i32));
+    assert_eq!(
+        shadow_of("<shadow:#80FF0000>x"),
+        Some(0x80FF_0000_u32 as i32)
+    );
+    assert_eq!(shadow_of("<shadow:red:0.5>x"), Some(0x80FF_5555_u32 as i32));
+    assert_eq!(
+        shadow_of("<shadow:#ff0000:0.5>x"),
+        Some(0x80FF_0000_u32 as i32)
+    );
+    assert_eq!(shadow_of("<shadow:red:0>x"), Some(0x00FF_5555));
+    assert_eq!(shadow_of("<shadow:red:1>x"), Some(0xFFFF_5555_u32 as i32));
+    assert_eq!(shadow_of("<!shadow>x"), Some(0));
+
+    for input in [
+        "<shadow:red:2>x",
+        "<shadow:red:-0.5>x",
+        "<shadow:red:half>x",
+        "<shadow:red:0.5:0.5>x",
+        "<!shadow:red>x",
+        "<!red>x",
+    ] {
+        assert!(
+            parse(input, Mode::Runtime).is_err(),
+            "{input:?} parsed but should not"
+        );
+    }
+}
+
+#[test]
+fn tag_names_are_case_insensitive() {
+    for (upper, lower) in [
+        ("<RED>x</Red>", "<red>x</red>"),
+        ("<C:blue>x</c>", "<color:blue>x</color>"),
+        ("<COLOUR:#00FF00>x", "<color:#00ff00>x"),
+        ("<Shadow:red>x", "<shadow:red>x"),
+        ("<B>x</B>", "<bold>x</bold>"),
+        ("a<NewLine>b", "a<newline>b"),
+        ("<Key:key.jump>", "<key:key.jump>"),
+    ] {
+        assert_eq!(
+            shape(upper, Mode::Runtime),
+            shape(lower, Mode::Runtime),
+            "{upper:?} vs {lower:?}"
+        );
+    }
+    // a hole names a variable, so its case survives
+    assert_eq!(dyn_color_name("<{Color}>x</{Color}>"), "Color");
+    assert_eq!(
+        shape("<Font:Minecraft:Uniform>x", Mode::Runtime).1[0].font,
+        Some("Minecraft:Uniform".to_string())
+    );
+}
+
+#[test]
+fn double_quotes_work_like_single_quotes() {
+    let hover = |input: &str| match pieces(input, Mode::Runtime)[0].style().hover.clone() {
+        Some(HoverIr::Text(text)) => text_of(&text),
+        other => panic!("{input:?}: expected hover text, got {other:?}"),
+    };
+    assert_eq!(hover("<hover:show_text:\"hi\">x</hover>"), "hi");
+    assert_eq!(hover("<hover:show_text:\"it's\">x</hover>"), "it's");
+    assert_eq!(
+        hover("<hover:show_text:\"say \\\"hi\\\"\">x</hover>"),
+        "say \"hi\""
+    );
+    assert_eq!(
+        hover("<hover:show_text:'say \"hi\"'>x</hover>"),
+        "say \"hi\""
+    );
+
+    let err = parse("<hover:show_text:\"a'>x", Mode::Runtime).unwrap_err();
+    assert!(err.message.contains("unclosed `\"`"), "{}", err.message);
+    let err = parse("<insertion:\"a\"b\">x", Mode::Runtime).unwrap_err();
+    assert!(
+        err.message.contains("must span the whole argument"),
+        "{}",
+        err.message
+    );
+}
+
+#[test]
+fn self_closing_tags_close_themselves() {
+    // the source ranges differ, so compare text and styling
+    assert_eq!(
+        shape("<key:key.jump/>x", Mode::Runtime),
+        shape("<key:key.jump>x", Mode::Runtime)
+    );
+    assert!(matches!(
+        &pieces("<key:key.jump/>x", Mode::Runtime)[0],
+        Piece::Keybind { key, .. } if key == "key.jump"
+    ));
+    assert_eq!(shape("<red/>x", Mode::Runtime), shape("x", Mode::Runtime));
+    assert_eq!(
+        shape("<red/>x<red>y", Mode::Runtime),
+        shape("x<red>y</red>", Mode::Runtime)
+    );
+    assert_eq!(text_of(&pieces("a<newline/>b", Mode::Runtime)), "a\nb");
+    assert_eq!(
+        pieces("<font:a/b>x", Mode::Runtime)[0].style().font,
+        Some("a/b".to_string())
+    );
+    assert_eq!(
+        shape("<insert:'x'/>y", Mode::Runtime),
+        shape("y", Mode::Runtime)
+    );
+}
+
+#[test]
+fn lang_or_carries_a_fallback() {
+    let fallback = |input: &str| match &pieces(input, Mode::Runtime)[0] {
+        Piece::Lang { fallback, args, .. } => {
+            (fallback.as_deref().and_then(StrSeg::join_lits), args.len())
+        }
+        other => panic!("{input:?}: expected a translation, got {other:?}"),
+    };
+    assert_eq!(
+        fallback("<lang_or:my.key:'Fallback text'>"),
+        (Some("Fallback text".to_string()), 0)
+    );
+    assert_eq!(
+        fallback("<tr_or:my.key:'Fallback':'a':'b'>"),
+        (Some("Fallback".to_string()), 2)
+    );
+    assert_eq!(
+        fallback("<translate_or:my.key:'Fallback'>"),
+        (Some("Fallback".to_string()), 0)
+    );
+    assert_eq!(fallback("<lang:my.key:'a'>"), (None, 1));
+
+    let err = parse("<lang_or:my.key>", Mode::Runtime).unwrap_err();
+    assert!(err.message.contains("needs a fallback"), "{}", err.message);
+}
