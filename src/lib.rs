@@ -141,6 +141,7 @@ impl TextComponent {
         }
     }
 
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
     /// Creates a [`TextComponent`] of a plain text at compile time.
     /// ## Example
     /// ```
@@ -233,6 +234,7 @@ impl TextComponent {
             interactions: Interactivity::new(),
         }
     }
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
     /// Creates a [`TextComponent`] with an image from a resource pack, showing `fallback` when the client cannot draw the sprite.
     /// ## Example
     /// ```
@@ -274,7 +276,7 @@ impl TextComponent {
     pub fn player_head(player: ObjectPlayer, hat: bool) -> Self {
         TextComponent {
             content: Content::Object(Object::Player {
-                player: Box::new(player),
+                player: MaybeStatic::Owned(Box::new(player)),
                 hat,
                 fallback: None,
             }),
@@ -289,17 +291,18 @@ impl TextComponent {
     /// ```
     /// # use text_components::{TextComponent, content::ObjectPlayer};
     /// static MISSING: TextComponent = TextComponent::const_tree("[head]", &[]);
-    /// TextComponent::player_head_with_fallback(ObjectPlayer::name("Jeb_"), true, &MISSING);
+    /// static JEB: ObjectPlayer = ObjectPlayer::const_name("Jeb_");
+    /// static HEAD: TextComponent = TextComponent::player_head_with_fallback(&JEB, true, &MISSING);
     /// ```
     #[must_use]
-    pub fn player_head_with_fallback(
-        player: ObjectPlayer,
+    pub const fn player_head_with_fallback(
+        player: &'static ObjectPlayer,
         hat: bool,
         fallback: &'static TextComponent,
     ) -> Self {
         TextComponent {
             content: Content::Object(Object::Player {
-                player: Box::new(player),
+                player: MaybeStatic::Static(player),
                 hat,
                 fallback: Some(MaybeStatic::Static(fallback)),
             }),
@@ -352,7 +355,7 @@ impl TextComponent {
         TextComponent {
             content: Content::Resolvable(Resolvable::Entity {
                 selector: selector.into(),
-                separator: separator.map(Box::new),
+                separator: separator.map(Into::into),
             }),
             children: Cow::Borrowed(&[]),
             format: Format::new(),
@@ -383,7 +386,7 @@ impl TextComponent {
                 path: path.into(),
                 interpret,
                 plain: false,
-                separator: separator.map(Box::new),
+                separator: separator.map(Into::into),
                 source,
             }),
             children: Cow::Borrowed(&[]),
@@ -409,6 +412,7 @@ impl TextComponent {
     reason = "this is a const impl, they are already const"
 )]
 const impl TextComponent {
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
     /// A const node.
     #[must_use]
     pub fn const_node(
@@ -437,6 +441,7 @@ const impl TextComponent {
         }
     }
 
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
     /// Shorthand for a node with only borrowed children.
     #[must_use]
     pub fn const_tree(text: &'static str, children: &'static [TextComponent]) -> Self {

@@ -56,7 +56,7 @@ pub enum Object {
     },
     Player {
         /// The player profile to render.
-        player: Box<ObjectPlayer>,
+        player: MaybeStatic<ObjectPlayer>,
         #[cfg_attr(
             feature = "serde",
             serde(skip_serializing_if = "Clone::clone", default)
@@ -105,9 +105,9 @@ pub struct ObjectPlayer {
     pub model: Option<PlayerModel>,
     #[cfg_attr(
         feature = "serde",
-        serde(skip_serializing_if = "Vec::is_empty", default)
+        serde(skip_serializing_if = "has_no_properties", default)
     )]
-    pub properties: Vec<PlayerProperties>,
+    pub properties: Cow<'static, [PlayerProperties]>,
 }
 impl ObjectPlayer {
     /// Creates a [`ObjectPlayer`] from a player's name.
@@ -119,7 +119,21 @@ impl ObjectPlayer {
             cape: None,
             elytra: None,
             model: None,
-            properties: vec![],
+            properties: Cow::Borrowed(&[]),
+        }
+    }
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
+    /// Creates a [`ObjectPlayer`] from a player's name known at compile time.
+    #[must_use]
+    pub const fn const_name(name: &'static str) -> Self {
+        ObjectPlayer {
+            name: Some(Cow::Borrowed(name)),
+            id: None,
+            texture: None,
+            cape: None,
+            elytra: None,
+            model: None,
+            properties: Cow::Borrowed(&[]),
         }
     }
     /// Creates a [`ObjectPlayer`] from the id of a player.
@@ -132,7 +146,7 @@ impl ObjectPlayer {
             cape: None,
             elytra: None,
             model: None,
-            properties: vec![],
+            properties: Cow::Borrowed(&[]),
         }
     }
     /// Creates a [`ObjectPlayer`] from the path to a texture of a resource pack.
@@ -144,7 +158,7 @@ impl ObjectPlayer {
             cape: None,
             elytra: None,
             model: None,
-            properties: vec![],
+            properties: Cow::Borrowed(&[]),
         }
     }
     /// Creates a [`ObjectPlayer`] from a player's skin properties.
@@ -159,11 +173,11 @@ impl ObjectPlayer {
             cape: None,
             elytra: None,
             model: None,
-            properties: vec![PlayerProperties {
+            properties: Cow::Owned(vec![PlayerProperties {
                 name: Cow::Borrowed("textures"),
                 value: value.into(),
                 signature: signature.map(Into::into),
-            }],
+            }]),
         }
     }
     #[must_use]
@@ -174,7 +188,10 @@ impl ObjectPlayer {
             && self.cape.is_none()
             && self.elytra.is_none()
             && self.model.is_none()
-            && self.properties.is_empty()
+            && match &self.properties {
+                Cow::Borrowed(properties) => properties.is_empty(),
+                Cow::Owned(properties) => properties.is_empty(),
+            }
     }
 }
 
@@ -215,7 +232,7 @@ pub enum Resolvable {
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        separator: Option<Box<TextComponent>>,
+        separator: Option<MaybeStatic<TextComponent>>,
     },
     /// #### Needs [resolution](TextComponent::resolve)
     #[cfg_attr(feature = "serde", serde(untagged))]
@@ -232,7 +249,7 @@ pub enum Resolvable {
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        separator: Option<Box<TextComponent>>,
+        separator: Option<MaybeStatic<TextComponent>>,
         #[cfg_attr(feature = "serde", serde(flatten, default = "NbtSource::Entity"))]
         source: NbtSource,
     },
@@ -256,30 +273,39 @@ const fn default_atlas() -> Cow<'static, str> {
 fn is_default_atlas(value: &str) -> bool {
     value == "minecraft:blocks"
 }
+
+#[cfg(feature = "serde")]
+const fn has_no_properties(value: &[PlayerProperties]) -> bool {
+    value.is_empty()
+}
+
+static ENTITY_SEPARATOR: TextComponent = TextComponent {
+    content: Content::Text {
+        text: Cow::Borrowed(", "),
+    },
+    children: Cow::Borrowed(&[]),
+    format: Format::new().color(Color::Gray),
+    interactions: Interactivity::new(),
+};
+
+static NBT_SEPARATOR: TextComponent = TextComponent {
+    content: Content::Text {
+        text: Cow::Borrowed(", "),
+    },
+    children: Cow::Borrowed(&[]),
+    format: Format::new(),
+    interactions: Interactivity::new(),
+};
 impl Resolvable {
     /// The grey comma vanilla puts between entities.
     #[must_use]
-    pub fn entity_separator() -> Box<TextComponent> {
-        Box::new(TextComponent {
-            content: Content::Text {
-                text: Cow::Borrowed(", "),
-            },
-            format: Format {
-                color: Some(Color::Gray),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
+    pub const fn entity_separator() -> &'static TextComponent {
+        &ENTITY_SEPARATOR
     }
     /// The comma vanilla puts between NBT values.
     #[must_use]
-    pub fn nbt_separator() -> Box<TextComponent> {
-        Box::new(TextComponent {
-            content: Content::Text {
-                text: Cow::Borrowed(", "),
-            },
-            ..Default::default()
-        })
+    pub const fn nbt_separator() -> &'static TextComponent {
+        &NBT_SEPARATOR
     }
 }
 
@@ -332,7 +358,7 @@ impl From<ObjectPlayer> for TextComponent {
     fn from(value: ObjectPlayer) -> Self {
         TextComponent {
             content: Content::Object(Object::Player {
-                player: Box::new(value),
+                player: MaybeStatic::Owned(Box::new(value)),
                 hat: true,
                 fallback: None,
             }),

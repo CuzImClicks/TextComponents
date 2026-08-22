@@ -269,23 +269,35 @@ fn match_content(
                 if let Some(Content::Resolvable(Resolvable::Entity { separator, .. })) =
                     &mut compound.contents[3]
                 {
-                    *separator = Some(Box::new(parse_body(Some(first), chars)?));
+                    *separator = Some(MaybeStatic::Owned(Box::new(parse_body(
+                        Some(first),
+                        chars,
+                    )?)));
                 } else {
                     compound.contents[3] = Some(Content::Resolvable(Resolvable::Entity {
                         selector: Cow::Borrowed("-None-"),
-                        separator: Some(Box::new(parse_body(Some(first), chars)?)),
+                        separator: Some(MaybeStatic::Owned(Box::new(parse_body(
+                            Some(first),
+                            chars,
+                        )?))),
                     }));
                 }
                 if let Some(Content::Resolvable(Resolvable::NBT { separator, .. })) =
                     &mut compound.contents[5]
                 {
-                    *separator = Some(Box::new(parse_body(Some(first), chars)?));
+                    *separator = Some(MaybeStatic::Owned(Box::new(parse_body(
+                        Some(first),
+                        chars,
+                    )?)));
                 } else {
                     compound.contents[5] = Some(Content::Resolvable(Resolvable::NBT {
                         path: Cow::Borrowed("-None-"),
                         interpret: false,
                         plain: false,
-                        separator: Some(Box::new(parse_body(Some(first), chars)?)),
+                        separator: Some(MaybeStatic::Owned(Box::new(parse_body(
+                            Some(first),
+                            chars,
+                        )?))),
                         source: NbtSource::Block(Cow::Borrowed("")),
                     }));
                 }
@@ -420,10 +432,10 @@ fn match_content(
                 if let Some(Content::Object(Object::Player { player, .. })) =
                     &mut compound.contents[7]
                 {
-                    **player = parse_player(chars)?;
+                    *player = MaybeStatic::Owned(Box::new(parse_player(chars)?));
                 } else {
                     compound.contents[7] = Some(Content::Object(Object::Player {
-                        player: Box::new(parse_player(chars)?),
+                        player: MaybeStatic::Owned(Box::new(parse_player(chars)?)),
                         hat: true,
                         fallback: None,
                     }));
@@ -439,15 +451,15 @@ fn match_content(
                     *hat = parse_bool(first, chars, "hat")?;
                 } else {
                     compound.contents[7] = Some(Content::Object(Object::Player {
-                        player: Box::new(ObjectPlayer {
+                        player: MaybeStatic::Owned(Box::new(ObjectPlayer {
                             name: None,
                             id: None,
                             texture: None,
                             cape: None,
                             elytra: None,
                             model: None,
-                            properties: vec![],
-                        }),
+                            properties: Cow::Borrowed(&[]),
+                        })),
                         hat: parse_bool(first, chars, "hat")?,
                         fallback: None,
                     }));

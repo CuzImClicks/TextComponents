@@ -321,11 +321,17 @@ pub(super) fn parse_hover(chars: &mut Peekable<Chars>) -> SnbtResult<HoverEvent>
                         },
                         "name" => match &mut events[2] {
                             Some(HoverEvent::ShowEntity { name, .. }) => {
-                                *name = Some(Box::new(parse_body(Some(next), chars)?));
+                                *name = Some(MaybeStatic::Owned(Box::new(parse_body(
+                                    Some(next),
+                                    chars,
+                                )?)));
                             }
                             _ => {
                                 events[2] = Some(HoverEvent::ShowEntity {
-                                    name: Some(Box::new(parse_body(Some(next), chars)?)),
+                                    name: Some(MaybeStatic::Owned(Box::new(parse_body(
+                                        Some(next),
+                                        chars,
+                                    )?))),
                                     id: Cow::Borrowed("-None-"),
                                     uuid: Uuid::nil(),
                                 });

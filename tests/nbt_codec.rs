@@ -16,12 +16,13 @@ use text_components::custom::{CustomData, Payload};
 use text_components::interactivity::{HoverEvent, MaybeStatic};
 use text_components::{
     Args, EmbeddedNbtCodec, EncodedNbt, Modifier, NbtValue, TextComponent,
-    content::{Content, NbtSource, Object, ObjectPlayer, Resolvable},
-    format::Color,
-    interactivity::{ClickEvent, Dialog},
+    content::{Content, NbtSource, Object, ObjectPlayer, PlayerProperties, Resolvable},
+    format::{Color, Format},
+    interactivity::{ClickEvent, Dialog, Interactivity},
     nbt::ComponentDecodeError,
     translation::TranslatedMessage,
 };
+use uuid::Uuid;
 
 struct CodecOutput(NbtTag);
 
@@ -343,6 +344,22 @@ fn static_object_fallbacks_encode_like_owned_ones() {
         Some("minecraft:items"),
         &FALLBACK,
     );
+    static PROPERTIES: [PlayerProperties; 1] = [PlayerProperties {
+        name: Cow::Borrowed("textures"),
+        value: Cow::Borrowed("ZXhhbXBsZQ=="),
+        signature: Some(Cow::Borrowed("c2lnbmF0dXJl")),
+    }];
+    static PROFILE: ObjectPlayer = ObjectPlayer {
+        name: Some(Cow::Borrowed("Jeb_")),
+        id: None,
+        texture: None,
+        cape: None,
+        elytra: None,
+        model: None,
+        properties: Cow::Borrowed(&PROPERTIES),
+    };
+    static PLAYER: TextComponent =
+        TextComponent::player_head_with_fallback(&PROFILE, true, &FALLBACK);
 
     let owned_atlas = TextComponent::from(Object::Atlas {
         atlas: "minecraft:items".into(),
@@ -353,14 +370,70 @@ fn static_object_fallbacks_encode_like_owned_ones() {
     });
     assert_eq!((&ATLAS).to_nbt_tag(), (&owned_atlas).to_nbt_tag());
 
-    let static_player =
-        TextComponent::player_head_with_fallback(ObjectPlayer::name("Jeb_"), true, &FALLBACK);
+    let mut profile = ObjectPlayer::name("Jeb_");
+    profile.properties = Cow::Owned(vec![PlayerProperties {
+        name: "textures".into(),
+        value: "ZXhhbXBsZQ==".into(),
+        signature: Some("c2lnbmF0dXJl".into()),
+    }]);
     let owned_player = TextComponent::from(Object::Player {
-        player: Box::new(ObjectPlayer::name("Jeb_")),
+        player: MaybeStatic::Owned(Box::new(profile)),
         hat: true,
         fallback: Some(MaybeStatic::Owned(Box::new(TextComponent::plain(
             "diamond",
         )))),
     });
-    assert_eq!((&static_player).to_nbt_tag(), (&owned_player).to_nbt_tag());
+    assert_eq!((&PLAYER).to_nbt_tag(), (&owned_player).to_nbt_tag());
+}
+
+#[test]
+fn static_separators_and_entity_names_encode_like_owned_ones() {
+    static ENTITY: TextComponent = TextComponent {
+        content: Content::Resolvable(Resolvable::Entity {
+            selector: Cow::Borrowed("@a"),
+            separator: Some(MaybeStatic::Static(Resolvable::entity_separator())),
+        }),
+        children: Cow::Borrowed(&[]),
+        format: Format::new(),
+        interactions: Interactivity::new(),
+    };
+    static NBT: TextComponent = TextComponent {
+        content: Content::Resolvable(Resolvable::NBT {
+            path: Cow::Borrowed("Health"),
+            interpret: false,
+            plain: false,
+            separator: Some(MaybeStatic::Static(Resolvable::nbt_separator())),
+            source: NbtSource::Entity(Cow::Borrowed("@p")),
+        }),
+        children: Cow::Borrowed(&[]),
+        format: Format::new(),
+        interactions: Interactivity::new(),
+    };
+    static NAME: TextComponent = TextComponent::const_plain("Creeper");
+    static SHOW_ENTITY: HoverEvent = HoverEvent::ShowEntity {
+        name: Some(MaybeStatic::Static(&NAME)),
+        id: Cow::Borrowed("minecraft:creeper"),
+        uuid: Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0),
+    };
+
+    let owned_entity = TextComponent::entity("@a", Some(Resolvable::entity_separator().clone()));
+    assert_eq!((&ENTITY).to_nbt_tag(), (&owned_entity).to_nbt_tag());
+
+    let owned_nbt = TextComponent::nbt(
+        "Health",
+        NbtSource::entity("@p"),
+        false,
+        Some(Resolvable::nbt_separator().clone()),
+    );
+    assert_eq!((&NBT).to_nbt_tag(), (&owned_nbt).to_nbt_tag());
+
+    let mut static_hover = TextComponent::plain("mob");
+    static_hover.interactions.hover = Some(MaybeStatic::Static(&SHOW_ENTITY));
+    let mut owned_hover = TextComponent::plain("mob");
+    owned_hover.interactions.hover = Some(MaybeStatic::Owned(Box::new(HoverEvent::show_entity(
+        "minecraft:creeper",
+        Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0),
+        Some(TextComponent::plain("Creeper")),
+    ))));
+    assert_eq!((&static_hover).to_nbt_tag(), (&owned_hover).to_nbt_tag());
 }

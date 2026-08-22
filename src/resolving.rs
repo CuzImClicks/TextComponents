@@ -210,7 +210,8 @@ impl TextComponent {
                 match &mut resolvable {
                     Resolvable::Entity { separator, .. } | Resolvable::NBT { separator, .. } => {
                         if let Some(value) = separator {
-                            **value = value.try_resolve_at_depth(resolutor, content_depth)?;
+                            let resolved = value.try_resolve_at_depth(resolutor, content_depth)?;
+                            *value = MaybeStatic::Owned(Box::new(resolved));
                         }
                     }
                     Resolvable::Scoreboard { .. } => {}

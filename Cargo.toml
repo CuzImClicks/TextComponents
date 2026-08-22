@@ -85,6 +85,7 @@ chrono = "0.4"
 criterion = { version = "0.7", features = ["html_reports"] }
 serde_json = "1.0.149"
 text_components_macros = { path = "macros" }
+uuid = "1.23"
 
 [[bench]]
 name = "component"

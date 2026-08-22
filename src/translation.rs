@@ -133,6 +133,7 @@ pub struct TranslatedMessage {
     pub args: Args,
 }
 impl TranslatedMessage {
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
     /// Creates a new `TranslatedMessage` without fallback.
     #[must_use]
     pub const fn new(key: &'static str, args: Args) -> Self {
@@ -143,6 +144,7 @@ impl TranslatedMessage {
         }
     }
 
+    // TODO: take impl Into<Cow<'static, str>> when From<&str> for Cow is const
     /// Creates a new `TranslatedMessage` showing `fallback` when the key is unknown.
     #[must_use]
     pub const fn with_fallback(key: &'static str, fallback: &'static str, args: Args) -> Self {

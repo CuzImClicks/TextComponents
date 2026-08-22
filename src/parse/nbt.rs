@@ -255,7 +255,9 @@ fn parse_score(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> 
 fn parse_selector(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
     let selector = required_string(compound, "selector")?;
     let separator = match compound.get("separator") {
-        Some(tag) => Some(Box::new(TextComponent::try_from_nbt(tag)?)),
+        Some(tag) => Some(MaybeStatic::Owned(Box::new(TextComponent::try_from_nbt(
+            tag,
+        )?))),
         None => None,
     };
     Ok(Content::Resolvable(Resolvable::Entity {
@@ -274,7 +276,7 @@ fn parse_nbt(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
     let separator = compound
         .get("separator")
         .and_then(|tag| TextComponent::try_from_nbt(tag).ok())
-        .map(Box::new);
+        .map(|separator| MaybeStatic::Owned(Box::new(separator)));
     Ok(Content::Resolvable(Resolvable::NBT {
         path: path.into(),
         interpret,
@@ -363,7 +365,7 @@ fn parse_player(
     };
     let hat = compound.get("hat").and_then(as_bool).unwrap_or(true);
     Ok(Content::Object(Object::Player {
-        player: Box::new(player),
+        player: MaybeStatic::Owned(Box::new(player)),
         hat,
         fallback,
     }))
@@ -404,9 +406,11 @@ fn parse_player_profile(profile: &NbtCompound) -> Result<ObjectPlayer, Component
     })
 }
 
-fn parse_properties(tag: Option<&NbtTag>) -> Result<Vec<PlayerProperties>, ComponentDecodeError> {
+fn parse_properties(
+    tag: Option<&NbtTag>,
+) -> Result<Cow<'static, [PlayerProperties]>, ComponentDecodeError> {
     let Some(tag) = tag else {
-        return Ok(Vec::new());
+        return Ok(Cow::Borrowed(&[]));
     };
     let properties = match tag {
         NbtTag::List(NbtList::Compound(properties)) => properties
@@ -440,7 +444,7 @@ fn parse_properties(tag: Option<&NbtTag>) -> Result<Vec<PlayerProperties>, Compo
     if properties.len() > 16 {
         return Err(invalid("properties", "at most 16 properties"));
     }
-    Ok(properties)
+    Ok(Cow::Owned(properties))
 }
 
 #[cfg(feature = "custom")]
@@ -590,7 +594,9 @@ impl HoverEvent {
                         .ok_or(ComponentDecodeError::MissingField("uuid"))?,
                 )?;
                 let name = match compound.get("name") {
-                    Some(name) => Some(Box::new(TextComponent::try_from_nbt(name)?)),
+                    Some(name) => Some(MaybeStatic::Owned(Box::new(TextComponent::try_from_nbt(
+                        name,
+                    )?))),
                     None => None,
                 };
                 Ok(Self::ShowEntity {

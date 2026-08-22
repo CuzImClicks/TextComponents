@@ -243,7 +243,7 @@ pub enum HoverEvent {
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        name: Option<Box<TextComponent>>,
+        name: Option<MaybeStatic<TextComponent>>,
         id: Cow<'static, str>,
         uuid: Uuid,
     },
@@ -274,7 +274,7 @@ impl HoverEvent {
         name: Option<R>,
     ) -> Self {
         HoverEvent::ShowEntity {
-            name: name.map(|r| Box::new(r.into())),
+            name: name.map(|r| MaybeStatic::Owned(Box::new(r.into()))),
             id: id.into(),
             uuid,
         }

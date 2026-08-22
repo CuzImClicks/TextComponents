@@ -77,7 +77,7 @@ pub(super) fn parse_player(chars: &mut Peekable<Chars>) -> SnbtResult<ObjectPlay
         cape: None,
         elytra: None,
         model: None,
-        properties: vec![],
+        properties: Cow::Borrowed(&[]),
     };
     let mut name = String::new();
     let mut in_name = true;
@@ -152,7 +152,7 @@ pub(super) fn parse_player(chars: &mut Peekable<Chars>) -> SnbtResult<ObjectPlay
                                             }
                                         }
                                     }
-                                    player.properties = properties;
+                                    player.properties = Cow::Owned(properties);
                                 }
                                 key => return Err(SnbtError::UnknownKey(key.to_string())),
                             }
