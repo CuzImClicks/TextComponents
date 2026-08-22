@@ -3,7 +3,7 @@ use crate::custom::CustomData;
 use crate::{
     TextComponent,
     format::{Color, Format},
-    interactivity::Interactivity,
+    interactivity::{Interactivity, MaybeStatic},
     translation::TranslatedMessage,
 };
 use std::borrow::Cow;
@@ -52,7 +52,7 @@ pub enum Object {
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        fallback: Option<Box<TextComponent>>,
+        fallback: Option<MaybeStatic<TextComponent>>,
     },
     Player {
         /// The player profile to render.
@@ -66,7 +66,7 @@ pub enum Object {
             feature = "serde",
             serde(skip_serializing_if = "Option::is_none", default)
         )]
-        fallback: Option<Box<TextComponent>>,
+        fallback: Option<MaybeStatic<TextComponent>>,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

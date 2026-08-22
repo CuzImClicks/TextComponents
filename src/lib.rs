@@ -233,6 +233,34 @@ impl TextComponent {
             interactions: Interactivity::new(),
         }
     }
+    /// Creates a [`TextComponent`] with an image from a resource pack, showing `fallback` when the client cannot draw the sprite.
+    /// ## Example
+    /// ```
+    /// # use text_components::TextComponent;
+    /// static FALLBACK: TextComponent = TextComponent::const_plain("Diamond Sword");
+    /// static SWORD: TextComponent =
+    ///     TextComponent::atlas_with_fallback("item/diamond_sword", Some("minecraft:items"), &FALLBACK);
+    /// ```
+    #[must_use]
+    pub const fn atlas_with_fallback(
+        sprite: &'static str,
+        atlas: Option<&'static str>,
+        fallback: &'static TextComponent,
+    ) -> Self {
+        TextComponent {
+            content: Content::Object(Object::Atlas {
+                atlas: match atlas {
+                    Some(atlas) => Cow::Borrowed(atlas),
+                    None => Cow::Borrowed("minecraft:blocks"),
+                },
+                sprite: Cow::Borrowed(sprite),
+                fallback: Some(MaybeStatic::Static(fallback)),
+            }),
+            children: Cow::Borrowed(&[]),
+            format: Format::new(),
+            interactions: Interactivity::new(),
+        }
+    }
     /// Creates a [`TextComponent`] with the head of a player in it.
     /// * `player` - A [`ObjectPlayer`] containing the required info
     /// * `hat` - Whether to display the hat layer
@@ -249,6 +277,31 @@ impl TextComponent {
                 player: Box::new(player),
                 hat,
                 fallback: None,
+            }),
+            children: Cow::Borrowed(&[]),
+            format: Format::new(),
+            interactions: Interactivity::new(),
+        }
+    }
+
+    /// Creates a [`TextComponent`] with the head of a player in it, showing `fallback` when the head is missing.
+    /// ## Example
+    /// ```
+    /// # use text_components::{TextComponent, content::ObjectPlayer};
+    /// static MISSING: TextComponent = TextComponent::const_tree("[head]", &[]);
+    /// TextComponent::player_head_with_fallback(ObjectPlayer::name("Jeb_"), true, &MISSING);
+    /// ```
+    #[must_use]
+    pub fn player_head_with_fallback(
+        player: ObjectPlayer,
+        hat: bool,
+        fallback: &'static TextComponent,
+    ) -> Self {
+        TextComponent {
+            content: Content::Object(Object::Player {
+                player: Box::new(player),
+                hat,
+                fallback: Some(MaybeStatic::Static(fallback)),
             }),
             children: Cow::Borrowed(&[]),
             format: Format::new(),

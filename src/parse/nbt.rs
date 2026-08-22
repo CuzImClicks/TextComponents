@@ -315,7 +315,9 @@ fn parse_nbt_source(compound: &NbtCompound) -> Result<NbtSource, ComponentDecode
 
 fn parse_object(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
     let fallback = match compound.get("fallback") {
-        Some(value) => Some(Box::new(TextComponent::try_from_nbt(value)?)),
+        Some(value) => Some(MaybeStatic::Owned(Box::new(TextComponent::try_from_nbt(
+            value,
+        )?))),
         None => None,
     };
     let object_type = optional_string(compound, "object")?;
@@ -331,7 +333,7 @@ fn parse_object(compound: &NbtCompound) -> Result<Content, ComponentDecodeError>
 
 fn parse_atlas(
     compound: &NbtCompound,
-    fallback: Option<Box<TextComponent>>,
+    fallback: Option<MaybeStatic<TextComponent>>,
 ) -> Result<Content, ComponentDecodeError> {
     let atlas = optional_identifier(compound, "atlas")?
         .map_or(Cow::Borrowed("minecraft:blocks"), Cow::Owned);
@@ -345,7 +347,7 @@ fn parse_atlas(
 
 fn parse_player(
     compound: &NbtCompound,
-    fallback: Option<Box<TextComponent>>,
+    fallback: Option<MaybeStatic<TextComponent>>,
 ) -> Result<Content, ComponentDecodeError> {
     let player = compound
         .get("player")

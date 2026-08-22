@@ -50,7 +50,10 @@ fn resolution_reaches_hover_text_and_object_fallbacks() {
     let mut component = TextComponent::from(Object::Atlas {
         atlas: "minecraft:blocks".into(),
         sprite: "minecraft:item/diamond".into(),
-        fallback: Some(Box::new(TextComponent::entity("@fallback", None))),
+        fallback: Some(MaybeStatic::Owned(Box::new(TextComponent::entity(
+            "@fallback",
+            None,
+        )))),
     });
     component.interactions.hover = Some(MaybeStatic::Owned(Box::new(HoverEvent::show_text(
         TextComponent::entity("@hover", None),

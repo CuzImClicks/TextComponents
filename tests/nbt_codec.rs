@@ -16,7 +16,7 @@ use text_components::custom::{CustomData, Payload};
 use text_components::interactivity::{HoverEvent, MaybeStatic};
 use text_components::{
     Args, EmbeddedNbtCodec, EncodedNbt, Modifier, NbtValue, TextComponent,
-    content::{Content, NbtSource, Object, Resolvable},
+    content::{Content, NbtSource, Object, ObjectPlayer, Resolvable},
     format::Color,
     interactivity::{ClickEvent, Dialog},
     nbt::ComponentDecodeError,
@@ -333,4 +333,34 @@ fn modern_style_and_dialog_fields_round_trip() {
 
     let encoded = (&component).to_nbt_tag();
     assert_eq!(TextComponent::try_from_nbt(&encoded), Ok(component));
+}
+
+#[test]
+fn static_object_fallbacks_encode_like_owned_ones() {
+    static FALLBACK: TextComponent = TextComponent::const_tree("diamond", &[]);
+    static ATLAS: TextComponent = TextComponent::atlas_with_fallback(
+        "minecraft:item/diamond",
+        Some("minecraft:items"),
+        &FALLBACK,
+    );
+
+    let owned_atlas = TextComponent::from(Object::Atlas {
+        atlas: "minecraft:items".into(),
+        sprite: "minecraft:item/diamond".into(),
+        fallback: Some(MaybeStatic::Owned(Box::new(TextComponent::plain(
+            "diamond",
+        )))),
+    });
+    assert_eq!((&ATLAS).to_nbt_tag(), (&owned_atlas).to_nbt_tag());
+
+    let static_player =
+        TextComponent::player_head_with_fallback(ObjectPlayer::name("Jeb_"), true, &FALLBACK);
+    let owned_player = TextComponent::from(Object::Player {
+        player: Box::new(ObjectPlayer::name("Jeb_")),
+        hat: true,
+        fallback: Some(MaybeStatic::Owned(Box::new(TextComponent::plain(
+            "diamond",
+        )))),
+    });
+    assert_eq!((&static_player).to_nbt_tag(), (&owned_player).to_nbt_tag());
 }

@@ -200,7 +200,8 @@ impl TextComponent {
                     Object::Atlas { fallback, .. } | Object::Player { fallback, .. } => fallback,
                 };
                 if let Some(value) = fallback {
-                    **value = value.try_resolve_at_depth(resolutor, content_depth)?;
+                    let resolved = value.try_resolve_at_depth(resolutor, content_depth)?;
+                    *value = MaybeStatic::Owned(Box::new(resolved));
                 }
                 resolutor.try_resolve_other(&Content::Object(object))?
             }
