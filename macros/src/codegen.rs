@@ -376,10 +376,18 @@ impl Codegen {
             Piece::Text { text, .. } => self.leaf_tokens(text, style),
             Piece::Lang {
                 key: LangKey::Lit(key),
-                fallback: None,
+                fallback,
                 args,
                 ..
             } => {
+                let fallback_expr = match fallback {
+                    None => quote!(::core::option::Option::None),
+                    Some(segs) => {
+                        let lit =
+                            StrSeg::join_lits(segs).expect("a static <lang> fallback has no holes");
+                        quote!(::core::option::Option::Some(::std::borrow::Cow::Borrowed(#lit)))
+                    }
+                };
                 let args_expr = if args.is_empty() {
                     quote!(::text_components::Args::None)
                 } else {
@@ -397,7 +405,7 @@ impl Codegen {
                 let content = quote!(::text_components::content::Content::Translate(
                     ::text_components::translation::TranslatedMessage {
                         key: ::std::borrow::Cow::Borrowed(#key),
-                        fallback: ::core::option::Option::None,
+                        fallback: #fallback_expr,
                         args: #args_expr,
                     }
                 ));
@@ -619,11 +627,13 @@ impl Codegen {
         let fallback_expr = match fallback {
             None => quote!(::core::option::Option::None),
             Some(segs) => {
-                let value = match StrSeg::join_lits(segs) {
-                    Some(lit) => quote!(#lit),
-                    None => self.str_splice_expr(segs),
+                let value = if let Some(lit) = StrSeg::join_lits(segs) {
+                    quote!(::std::borrow::Cow::Borrowed(#lit))
+                } else {
+                    let splice = self.str_splice_expr(segs);
+                    quote!(::std::borrow::Cow::Owned(#splice))
                 };
-                quote!(::core::option::Option::Some(::std::boxed::Box::<str>::from(#value)))
+                quote!(::core::option::Option::Some(#value))
             }
         };
         let args_expr = if args.is_empty() {

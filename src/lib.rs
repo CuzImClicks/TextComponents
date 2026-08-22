@@ -627,8 +627,8 @@ mod size_tests {
 
     #[test]
     fn model_widths_are_unchanged() {
-        assert_eq!(size_of::<TranslatedMessage>(), 64);
-        assert_eq!(size_of::<Content>(), 72);
-        assert_eq!(size_of::<TextComponent>(), 200);
+        assert_eq!(size_of::<TranslatedMessage>(), 72);
+        assert_eq!(size_of::<Content>(), 80);
+        assert_eq!(size_of::<TextComponent>(), 208);
     }
 }

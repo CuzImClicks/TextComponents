@@ -560,7 +560,7 @@ impl MiniMessage {
                     }
                 };
                 let fallback = match fallback {
-                    Some(segs) => Some(resolve_string(segs, "fallback", values)?.into_boxed_str()),
+                    Some(segs) => Some(Cow::Owned(resolve_string(segs, "fallback", values)?)),
                     None => None,
                 };
                 let mut translated = Vec::with_capacity(args.len());

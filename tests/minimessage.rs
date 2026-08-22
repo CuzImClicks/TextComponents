@@ -526,6 +526,8 @@ fn self_closing_tags_take_no_content() {
 fn lang_or_shows_a_fallback() {
     use text_components::content::Content;
 
+    const GREETING: TextComponent = text!("<lang_or:my.key:'Fallback text'>");
+
     let filled = parse("<lang_or:my.key:'Fallback text'>");
     match &filled.content {
         Content::Translate(msg) => {
@@ -535,7 +537,21 @@ fn lang_or_shows_a_fallback() {
         }
         other => panic!("expected a translation, got {other:?}"),
     }
-    assert_eq!(filled, text!("<lang_or:my.key:'Fallback text'>"));
+    assert_eq!(filled, GREETING);
+
+    let name = "Notch".to_string();
+    let spliced = text!("<lang_or:my.key:'Hi {name}'>");
+    match &spliced.content {
+        Content::Translate(msg) => assert_eq!(msg.fallback.as_deref(), Some("Hi Notch")),
+        other => panic!("expected a translation, got {other:?}"),
+    }
+    assert_eq!(
+        spliced,
+        MiniMessage::new("<lang_or:my.key:'Hi {name}'>")
+            .unwrap()
+            .fill(&[("name", "Notch".into())])
+            .unwrap()
+    );
 
     let template = MiniMessage::new("<tr_or:my.key:'Hi {name}':'{@arg}'>").unwrap();
     assert_eq!(template.holes().collect::<Vec<_>>(), ["arg", "name"]);

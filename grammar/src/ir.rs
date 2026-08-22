@@ -205,7 +205,7 @@ impl Piece {
                 ..
             } => {
                 matches!(key, LangKey::Dyn(_))
-                    || fallback.is_some() // TODO: make fallback const
+                    || fallback.as_deref().is_some_and(segs_have_dyn)
                     || args.iter().any(|arg| pieces_have_dyn(arg))
                     || style.has_dyn()
             }

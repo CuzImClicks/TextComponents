@@ -125,7 +125,7 @@ pub struct TranslatedMessage {
         feature = "serde",
         serde(skip_serializing_if = "Option::is_none", default)
     )]
-    pub fallback: Option<Box<str>>,
+    pub fallback: Option<Cow<'static, str>>,
     #[cfg_attr(
         feature = "serde",
         serde(skip_serializing_if = "Args::is_none", rename = "with", default)
@@ -143,6 +143,16 @@ impl TranslatedMessage {
         }
     }
 
+    /// Creates a new `TranslatedMessage` showing `fallback` when the key is unknown.
+    #[must_use]
+    pub const fn with_fallback(key: &'static str, fallback: &'static str, args: Args) -> Self {
+        Self {
+            key: Cow::Borrowed(key),
+            args,
+            fallback: Some(Cow::Borrowed(fallback)),
+        }
+    }
+
     /// The message as a [`TextComponent`].
     #[inline]
     #[must_use]
@@ -151,7 +161,7 @@ impl TranslatedMessage {
     }
     /// The message as a [`TextComponent`], showing `fallback` when the key is unknown.
     #[inline]
-    pub fn component_fallback(mut self, fallback: impl Into<Box<str>>) -> TextComponent {
+    pub fn component_fallback(mut self, fallback: impl Into<Cow<'static, str>>) -> TextComponent {
         self.fallback = Some(fallback.into());
         TextComponent::translated(self)
     }

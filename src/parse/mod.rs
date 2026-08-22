@@ -215,11 +215,11 @@ fn match_content(
         "fallback" => {
             if first == '\'' || first == '"' {
                 if let Some(Content::Translate(msg)) = &mut compound.contents[1] {
-                    msg.fallback = Some(parse_string(first, chars)?.into_boxed_str());
+                    msg.fallback = Some(Cow::Owned(parse_string(first, chars)?));
                 } else {
                     compound.contents[1] = Some(Content::Translate(TranslatedMessage {
                         key: Cow::Borrowed(""),
-                        fallback: Some(parse_string(first, chars)?.into_boxed_str()),
+                        fallback: Some(Cow::Owned(parse_string(first, chars)?)),
                         args: Args::None,
                     }));
                 }

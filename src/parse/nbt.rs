@@ -219,10 +219,7 @@ fn parse_text(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
 
 fn parse_translatable(compound: &NbtCompound) -> Result<Content, ComponentDecodeError> {
     let key = required_string(compound, "translate")?;
-    let fallback = compound
-        .get("fallback")
-        .and_then(as_string)
-        .map(String::into_boxed_str);
+    let fallback = compound.get("fallback").and_then(as_string).map(Cow::Owned);
     let args = match compound.get("with") {
         None => Args::None,
         Some(NbtTag::List(list)) => Args::Owned(
