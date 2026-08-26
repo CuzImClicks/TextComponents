@@ -11,10 +11,12 @@ pub(crate) fn static_runs(segs: &[NbtSeg]) -> Vec<Run<'_>> {
     let mut runs: Vec<Run> = Vec::new();
     for seg in segs {
         match seg {
-            NbtSeg::Bytes(_) | NbtSeg::ConstComponent { .. } => match runs.last_mut() {
-                Some(Run::Static(run)) => run.push(seg),
-                _ => runs.push(Run::Static(vec![seg])),
-            },
+            NbtSeg::Bytes(_) | NbtSeg::ConstComponent { .. } | NbtSeg::ConstText(_) => {
+                match runs.last_mut() {
+                    Some(Run::Static(run)) => run.push(seg),
+                    _ => runs.push(Run::Static(vec![seg])),
+                }
+            }
             other => runs.push(Run::Runtime(other)),
         }
     }

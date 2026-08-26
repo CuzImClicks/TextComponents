@@ -11,19 +11,19 @@ use crate::{
 };
 use crate::{
     TextComponent,
-    content::Content,
+    content::{Content, NbtSource, Object, ObjectPlayer, Resolvable},
     format::Color,
-    interactivity::{ClickEvent, HoverEvent, MaybeStatic},
+    interactivity::{ClickEvent, HoverEvent, MaybeStatic, Uuid},
     translation::TranslatedMessage,
 };
 use std::borrow::Cow;
 use std::error::Error as StdError;
 use std::fmt;
 #[cfg(feature = "nbt")]
-use text_components_grammar::nbt::{EventKind, NbtSeg, SplicePos, emit};
+use text_components_grammar::nbt::{EventKind, NbtSeg, SplicePos, Unresolved, emit};
 use text_components_grammar::{
-    BoolIr, ClickIr, ClickKind, ColorIr, HoleArg, HoleKind, HoverIr, LangKey, Mode, ParseError,
-    Piece, StrSeg, Style, parse,
+    BoolIr, ClickIr, ClickKind, ColorIr, HeadIr, HoleArg, HoleKind, HoverIr, LangKey, Mode,
+    NbtSourceIr, ParseError, Piece, StrSeg, Style, parse,
 };
 
 /// The value of one hole, passed to [`MiniMessage::fill`].
@@ -212,6 +212,15 @@ fn resolve_string(segs: &[StrSeg], what: &str, values: &[(&str, Value)]) -> Resu
     Ok(value)
 }
 
+fn uuid_ints(bytes: [u8; 16]) -> [i32; 4] {
+    let mut ints = [0; 4];
+    let (chunks, _) = bytes.as_chunks::<4>();
+    for (int, chunk) in ints.iter_mut().zip(chunks) {
+        *int = i32::from_be_bytes(*chunk);
+    }
+    ints
+}
+
 #[cfg(feature = "nbt")]
 fn patch_str_len(buf: &mut [u8], at: usize) -> Result<(), Error> {
     let n = u16::try_from(buf.len() - at - 2)
@@ -294,6 +303,11 @@ impl MiniMessage {
                         collect(arg, out);
                     }
                 }
+                if let Piece::Selector { separator, .. } | Piece::Nbt { separator, .. } = piece
+                    && let Some(separator) = separator
+                {
+                    collect(separator, out);
+                }
                 let style = piece.style();
                 if let Some(ColorIr::Dyn(arg)) = &style.color {
                     out.push(hole_name(arg));
@@ -315,8 +329,11 @@ impl MiniMessage {
                 }
                 match &style.hover {
                     Some(HoverIr::Text(hover)) => collect(hover, out),
+                    Some(HoverIr::Entity {
+                        name: Some(name), ..
+                    }) => collect(name, out),
                     Some(HoverIr::Dyn(arg)) => out.push(hole_name(arg)),
-                    None => {}
+                    Some(HoverIr::Item { .. } | HoverIr::Entity { name: None, .. }) | None => {}
                 }
                 match &style.click {
                     Some(ClickIr::Action(_, segs)) => collect_segs(segs, out),
@@ -517,8 +534,18 @@ impl MiniMessage {
                         }
                     }
                 }
-                NbtSeg::ConstComponent { .. } => {
-                    unreachable!("const splices are rejected in runtime templates")
+                NbtSeg::Unresolved { what, .. } => {
+                    let unresolved = match what {
+                        Unresolved::Scoreboard => crate::UnresolvedContent::Scoreboard,
+                        Unresolved::Entity => crate::UnresolvedContent::Entity,
+                        Unresolved::Nbt => crate::UnresolvedContent::Nbt,
+                    };
+                    return Err(Error::fill(format!(
+                        "{unresolved}; use fill() and resolve the component"
+                    )));
+                }
+                NbtSeg::ConstComponent { .. } | NbtSeg::ConstText(_) => {
+                    unreachable!("const holes are rejected in runtime templates")
                 }
             }
         }
@@ -578,6 +605,10 @@ impl MiniMessage {
                 });
                 Self::apply_style(component, style, values, false)
             }
+            Piece::Score { .. } | Piece::Selector { .. } | Piece::Nbt { .. } => {
+                Self::resolvable_piece(piece, values)
+            }
+            Piece::Sprite { .. } | Piece::Head { .. } => Self::object_piece(piece, values),
             Piece::Hole {
                 arg, kind, style, ..
             } => {
@@ -604,8 +635,8 @@ impl MiniMessage {
                              use fill_nbt(), or pass a TextComponent"
                         )));
                     }
-                    (HoleKind::ConstComponent, _) => {
-                        unreachable!("const splices are rejected in runtime templates")
+                    (HoleKind::ConstComponent | HoleKind::ConstText, _) => {
+                        unreachable!("const holes are rejected in runtime templates")
                     }
                     (_, other) => {
                         return Err(Error::fill(format!(
@@ -617,6 +648,77 @@ impl MiniMessage {
                 Self::apply_style(component, style, values, true)
             }
         }
+    }
+
+    fn fill_nested(
+        template: Option<&[Piece]>,
+        values: &[(&str, Value)],
+    ) -> Result<Option<MaybeStatic<TextComponent>>, Error> {
+        match template {
+            Some(pieces) => Ok(Some(MaybeStatic::Owned(Box::new(Self::fill_pieces(
+                pieces, values,
+            )?)))),
+            None => Ok(None),
+        }
+    }
+
+    fn resolvable_piece(piece: &Piece, values: &[(&str, Value)]) -> Result<TextComponent, Error> {
+        let content = match piece {
+            Piece::Score {
+                name, objective, ..
+            } => Resolvable::Scoreboard {
+                selector: Cow::Owned(name.clone()),
+                objective: Cow::Owned(objective.clone()),
+            },
+            Piece::Selector {
+                selector,
+                separator,
+                ..
+            } => Resolvable::Entity {
+                selector: Cow::Owned(selector.clone()),
+                separator: Self::fill_nested(separator.as_deref(), values)?,
+            },
+            Piece::Nbt {
+                source,
+                path,
+                interpret,
+                separator,
+                ..
+            } => Resolvable::NBT {
+                path: Cow::Owned(path.clone()),
+                interpret: *interpret,
+                plain: false,
+                separator: Self::fill_nested(separator.as_deref(), values)?,
+                source: match source {
+                    NbtSourceIr::Block(id) => NbtSource::Block(Cow::Owned(id.clone())),
+                    NbtSourceIr::Entity(id) => NbtSource::Entity(Cow::Owned(id.clone())),
+                    NbtSourceIr::Storage(id) => NbtSource::Storage(Cow::Owned(id.clone())),
+                },
+            },
+            _ => unreachable!("only resolvable pieces reach here"),
+        };
+        Self::apply_style(TextComponent::from(content), piece.style(), values, false)
+    }
+
+    fn object_piece(piece: &Piece, values: &[(&str, Value)]) -> Result<TextComponent, Error> {
+        let object = match piece {
+            Piece::Sprite { atlas, sprite, .. } => Object::Atlas {
+                atlas: Cow::Owned(atlas.clone()),
+                sprite: Cow::Owned(sprite.clone()),
+                fallback: None,
+            },
+            Piece::Head { player, hat, .. } => Object::Player {
+                player: MaybeStatic::Owned(Box::new(match player {
+                    HeadIr::Name(name) => ObjectPlayer::name(name.clone()),
+                    HeadIr::Uuid(bytes) => ObjectPlayer::id(uuid_ints(*bytes)),
+                    HeadIr::Texture(path) => ObjectPlayer::texture(path.clone()),
+                })),
+                hat: *hat,
+                fallback: None,
+            },
+            _ => unreachable!("only object pieces reach here"),
+        };
+        Self::apply_style(TextComponent::from(object), piece.style(), values, false)
     }
 
     #[expect(
@@ -717,6 +819,14 @@ impl MiniMessage {
                 HoverIr::Text(hover_pieces) => HoverEvent::ShowText {
                     value: MaybeStatic::Owned(Box::new(Self::fill_pieces(hover_pieces, values)?)),
                 },
+                HoverIr::Item { id, count } => {
+                    HoverEvent::show_item(id.clone(), Some(*count), None)
+                }
+                HoverIr::Entity { id, uuid, name } => HoverEvent::ShowEntity {
+                    name: Self::fill_nested(name.as_deref(), values)?,
+                    id: Cow::Owned(id.clone()),
+                    uuid: Uuid::from_bytes(*uuid),
+                },
             };
             if !fill_if_unset || component.interactions.hover.is_none() {
                 component.interactions.hover = Some(MaybeStatic::Owned(Box::new(event)));
@@ -761,6 +871,7 @@ impl MiniMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resolving::NoResolutor;
 
     /// The grammar's color table and [`Color`] are edited independently.
     #[test]
@@ -769,6 +880,184 @@ mod tests {
             let color = Color::from_codec_name(canonical)
                 .unwrap_or_else(|| panic!("`Color` has no variant for `{canonical}`"));
             assert_eq!(color.codec_name(), *canonical);
+        }
+    }
+
+    fn fill(template: &str, values: &[(&str, Value)]) -> TextComponent {
+        MiniMessage::new(template)
+            .expect("the template parses")
+            .fill(values)
+            .expect("the template fills")
+    }
+
+    #[test]
+    fn head_by_name() {
+        let component = fill("<head:Notch/>", &[]);
+        let Content::Object(Object::Player { player, hat, .. }) = &component.content else {
+            panic!("expected a player object, got {:?}", component.content);
+        };
+        assert!(*hat);
+        assert_eq!(player.name.as_deref(), Some("Notch"));
+    }
+
+    #[test]
+    fn head_by_uuid() {
+        let component = fill("<head:1f085b2d-9548-4159-a8c7-f3ccdf0c2054:false/>", &[]);
+        let Content::Object(Object::Player { player, hat, .. }) = &component.content else {
+            panic!("expected a player object, got {:?}", component.content);
+        };
+        assert!(!*hat);
+        let uuid = Uuid::parse_str("1f085b2d-9548-4159-a8c7-f3ccdf0c2054")
+            .expect("the literal is a UUID")
+            .as_u64_pair();
+        assert_eq!(
+            player.id,
+            Some([
+                ((uuid.0 >> 32) & 0xFFFF_FFFF) as i32,
+                (uuid.0 & 0xFFFF_FFFF) as i32,
+                ((uuid.1 >> 32) & 0xFFFF_FFFF) as i32,
+                (uuid.1 & 0xFFFF_FFFF) as i32,
+            ])
+        );
+    }
+
+    #[test]
+    fn selector_separator() {
+        let component = fill("<selector:@a:'<gray>, '>", &[]);
+        let Content::Resolvable(Resolvable::Entity {
+            selector,
+            separator,
+        }) = &component.content
+        else {
+            panic!("expected an entity selector, got {:?}", component.content);
+        };
+        assert_eq!(selector, "@a");
+        let separator = separator.as_ref().expect("the separator is set");
+        assert_eq!(separator.content, Content::from(", ".to_string()));
+        assert_eq!(separator.format.color, Some(Color::Gray));
+    }
+
+    #[test]
+    fn selector_separator_hole() {
+        let template = MiniMessage::new("<sel:@a:'{sep}'>").expect("the template parses");
+        assert_eq!(template.holes().collect::<Vec<_>>(), ["sep"]);
+        let component = template
+            .fill(&[("sep", Value::from(" | "))])
+            .expect("the template fills");
+        let Content::Resolvable(Resolvable::Entity { separator, .. }) = &component.content else {
+            panic!("expected an entity selector, got {:?}", component.content);
+        };
+        let separator = separator.as_ref().expect("the separator is set");
+        assert_eq!(separator.content, Content::from(" | ".to_string()));
+    }
+
+    #[test]
+    fn nbt_storage_interpret() {
+        let component = fill("<nbt:storage:'my:key':path:interpret/>", &[]);
+        let Content::Resolvable(Resolvable::NBT {
+            path,
+            interpret,
+            plain,
+            separator,
+            source,
+        }) = &component.content
+        else {
+            panic!("expected NBT content, got {:?}", component.content);
+        };
+        assert_eq!(path, "path");
+        assert!(*interpret);
+        assert!(!*plain);
+        assert!(separator.is_none());
+        assert_eq!(*source, NbtSource::Storage(Cow::Borrowed("my:key")));
+    }
+
+    #[test]
+    fn hover_show_item() {
+        let component = fill(
+            "<hover:show_item:'minecraft:diamond_sword':3>x</hover>",
+            &[],
+        );
+        let hover = component
+            .interactions
+            .hover
+            .as_ref()
+            .expect("the hover event is set");
+        let HoverEvent::ShowItem {
+            id,
+            count,
+            components,
+        } = &**hover
+        else {
+            panic!("expected a show_item event, got {hover:?}");
+        };
+        assert_eq!(id, "minecraft:diamond_sword");
+        assert_eq!(*count, 3);
+        assert!(components.is_none());
+    }
+
+    #[test]
+    fn hover_show_entity_name_hole() {
+        let template = MiniMessage::new(
+            "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig {name}'>x</hover>",
+        )
+        .expect("the template parses");
+        assert_eq!(template.holes().collect::<Vec<_>>(), ["name"]);
+        let component = template
+            .fill(&[("name", Value::from("Notch"))])
+            .expect("the template fills");
+        let hover = component
+            .interactions
+            .hover
+            .as_ref()
+            .expect("the hover event is set");
+        let HoverEvent::ShowEntity { name, id, uuid } = &**hover else {
+            panic!("expected a show_entity event, got {hover:?}");
+        };
+        assert_eq!(id, "minecraft:pig");
+        assert_eq!(
+            *uuid,
+            Uuid::parse_str("1f085b2d-9548-4159-a8c7-f3ccdf0c2054").expect("the literal is a UUID")
+        );
+        let name = name.as_ref().expect("the name is set");
+        assert_eq!(name.to_plain(&NoResolutor), "Pig Notch");
+    }
+
+    #[cfg(feature = "nbt")]
+    #[test]
+    fn unresolved_content_cannot_be_encoded() {
+        for template in [
+            "<score:a:b/>",
+            "<selector:@a/>",
+            "<nbt:entity:'@s':Health/>",
+        ] {
+            let template = MiniMessage::new(template).expect("the template parses");
+            template.fill(&[]).expect("the template fills");
+            let message = template
+                .fill_nbt(&[])
+                .expect_err("unresolved content cannot be encoded")
+                .to_string();
+            assert!(message.contains("resolved"), "got `{message}`");
+        }
+    }
+
+    #[test]
+    fn sprite_atlas() {
+        for (template, atlas) in [
+            (
+                "<sprite:'minecraft:items':item/emerald/>",
+                "minecraft:items",
+            ),
+            ("<sprite:item/emerald/>", "minecraft:blocks"),
+        ] {
+            let component = fill(template, &[]);
+            let Content::Object(Object::Atlas {
+                atlas: got, sprite, ..
+            }) = &component.content
+            else {
+                panic!("expected an atlas object, got {:?}", component.content);
+            };
+            assert_eq!(got, atlas);
+            assert_eq!(sprite, "item/emerald");
         }
     }
 }

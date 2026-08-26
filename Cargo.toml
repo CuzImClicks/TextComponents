@@ -94,3 +94,7 @@ harness = false
 [[example]]
 name = "serde"
 required-features = ["serde"]
+
+[[example]]
+name = "nbt"
+required-features = ["nbt"]

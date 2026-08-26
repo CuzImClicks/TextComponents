@@ -1,14 +1,17 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Ts;
 use quote::{format_ident, quote};
+use syn::LitStr;
 use text_components_grammar::nbt::{EventKind, NbtSeg, SplicePos, emit, to_mutf8};
 use text_components_grammar::{StrSeg, Style};
 
-use crate::analysis::{Usage, positional_binds, reject_const_holes, spec_format};
+use crate::analysis::{
+    Usage, positional_binds, reject_const_holes, reject_const_splice_in_hole_hover, spec_format,
+};
 use crate::codegen::Codegen;
 use crate::hygiene::hygienic;
 use crate::nbt::{Run, nbt_string_tokens, static_runs, write_formatted_tokens};
-use crate::parse::{Input, checked_parse, emit_error_to_syn};
+use crate::parse::{Input, checked_parse, emit_error_to_syn, precise_span};
 
 pub(crate) fn text(input: TokenStream) -> TokenStream {
     let Input { fmt, args } = syn::parse_macro_input!(input as Input);
@@ -36,6 +39,24 @@ pub(crate) fn text(input: TokenStream) -> TokenStream {
     .into()
 }
 
+fn unresolved_error(segs: &[NbtSeg], fmt: &LitStr) -> Option<syn::Error> {
+    segs.iter().find_map(|seg| match seg {
+        NbtSeg::Unresolved { what, range } => {
+            let span = precise_span(fmt, *range).unwrap_or_else(|| fmt.span());
+            Some(syn::Error::new(
+                span,
+                format!(
+                    "`<{}>` needs resolution before it can be encoded, and text_nbt! produces \
+                     bytes ready to send. Build the message with text! and resolve it, or resolve \
+                     the component and pass it through a {{@}} hole",
+                    what.tag()
+                ),
+            ))
+        }
+        _ => None,
+    })
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "one match arm per tag/variant; splitting hides the shape"
@@ -47,12 +68,19 @@ pub(crate) fn text_nbt(input: TokenStream) -> TokenStream {
         Err(e) => return e,
     };
     let pieces = template.pieces;
+    if let Err(e) = reject_const_splice_in_hole_hover(&pieces, &fmt) {
+        return e.to_compile_error().into();
+    }
     let segs = match emit(&pieces) {
         Ok(segs) => segs,
         Err(e) => {
             return emit_error_to_syn(&e, &fmt).to_compile_error().into();
         }
     };
+
+    if let Some(e) = unresolved_error(&segs, &fmt) {
+        return e.to_compile_error().into();
+    }
 
     let runs = static_runs(&segs);
 
@@ -91,8 +119,11 @@ pub(crate) fn text_nbt(input: TokenStream) -> TokenStream {
             Run::Runtime(seg) => seg,
         };
         match seg {
-            NbtSeg::Bytes(_) | NbtSeg::ConstComponent { .. } => {
+            NbtSeg::Bytes(_) | NbtSeg::ConstComponent { .. } | NbtSeg::ConstText(_) => {
                 unreachable!("byte runs and const splices are folded into statics")
+            }
+            NbtSeg::Unresolved { .. } => {
+                unreachable!("unresolved content is rejected before codegen")
             }
             NbtSeg::Hole(arg, spec) => {
                 let id = format_ident!("__tcm_a{hole_n}");

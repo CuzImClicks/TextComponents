@@ -56,14 +56,25 @@ pub(crate) fn all_tag_names() -> impl Iterator<Item = &'static str> {
         "c",
         "gradient",
         "rainbow",
+        "score",
+        "selector",
+        "sel",
+        "nbt",
+        "data",
+        "sprite",
+        "head",
+        "transition",
     ])
 }
 
 pub(crate) const SUPPORTED_SUMMARY: &str = "supported tags: named colors (<red>, <dark_gray>, …), <#RRGGBB>, \
      <b>/<i>/<u>/<st>/<obf>, <reset>, <newline>, <font:…>, <shadow:red:0.5>, \
      <key:key.jump>, <lang:key:'arg'>, <lang_or:key:'fallback'>, <gradient:#a:#b>, \
-     <rainbow>, <insert:'…'>, <hover:show_text:'…'>, <click:run_command:'…'> (and \
-     open_url, suggest_command, copy_to_clipboard, change_page, show_dialog)";
+     <rainbow>, <transition:red:blue:0.5>, <insert:'…'>, <hover:show_text:'…'>, \
+     <hover:show_item:'minecraft:stone':3>, <hover:show_entity:pig:uuid>, \
+     <click:run_command:'…'> (and open_url, suggest_command, copy_to_clipboard, \
+     change_page, show_dialog), <score:name:objective>, <selector:@a>, \
+     <nbt:entity:'@s':Health>, <sprite:item/emerald>, <head:Notch>";
 
 pub(crate) const COLOR_HELP: &str = "for example <color:red> or <color:#ff0000>";
 
@@ -80,6 +91,8 @@ pub(crate) fn canonical_tag(name: &str) -> String {
         "c" | "colour" => "color".into(),
         "tr" | "translate" => "lang".into(),
         "tr_or" | "translate_or" => "lang_or".into(),
+        "sel" => "selector".into(),
+        "data" => "nbt".into(),
         n if n.starts_with('#') || n.starts_with('{') => "color".into(),
         n => NAMED_COLORS
             .iter()

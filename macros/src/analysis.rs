@@ -26,6 +26,7 @@ pub(crate) enum Usage {
     Consume,
     Borrow,
     Const,
+    ConstText,
 }
 
 pub(crate) fn positional_ident(i: usize) -> Ident {
@@ -65,6 +66,7 @@ pub(crate) fn walk_holes(pieces: &[Piece], visit: &mut impl FnMut(&HoleArg, Usag
                 match kind {
                     HoleKind::Component => Usage::Consume,
                     HoleKind::ConstComponent => Usage::Const,
+                    HoleKind::ConstText => Usage::ConstText,
                     HoleKind::Text => Usage::Borrow,
                 },
             ),
@@ -84,7 +86,16 @@ pub(crate) fn walk_holes(pieces: &[Piece], visit: &mut impl FnMut(&HoleArg, Usag
                     walk_holes(arg, visit);
                 }
             }
-            Piece::Text { .. } | Piece::Keybind { .. } => {}
+            Piece::Selector { separator, .. } | Piece::Nbt { separator, .. } => {
+                if let Some(separator) = separator {
+                    walk_holes(separator, visit);
+                }
+            }
+            Piece::Text { .. }
+            | Piece::Keybind { .. }
+            | Piece::Score { .. }
+            | Piece::Sprite { .. }
+            | Piece::Head { .. } => {}
         }
         walk_style(piece.style(), visit);
     }
@@ -110,7 +121,12 @@ pub(crate) fn walk_style(style: &Style, visit: &mut impl FnMut(&HoleArg, Usage))
     match &style.hover {
         Some(HoverIr::Dyn(arg)) => visit(arg, Usage::Consume),
         Some(HoverIr::Text(pieces)) => walk_holes(pieces, visit),
-        None => {}
+        Some(HoverIr::Entity { name, .. }) => {
+            if let Some(name) = name {
+                walk_holes(name, visit);
+            }
+        }
+        Some(HoverIr::Item { .. }) | None => {}
     }
 }
 
@@ -132,8 +148,8 @@ pub(crate) fn count_uses(pieces: &[Piece]) -> HashMap<HoleKey, Uses> {
                 entry.consumes += 1;
             }
             Usage::Borrow => entry.total += 1,
-            // const splices are folded at compile time: no binding, no move
-            Usage::Const => {}
+            // consts are named directly at their use sites: no binding, no move
+            Usage::Const | Usage::ConstText => {}
         }
     });
     counts
@@ -150,6 +166,76 @@ pub(crate) fn reject_const_holes(pieces: &[Piece], lit: &LitStr) -> Result<(), s
             failed = Some(syn::Error::new(
                 span,
                 "`{@const …}` only works in text_nbt!. In text! use a plain {@NAME} hole",
+            ));
+        }
+    });
+    match failed {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// Visits every piece, including those nested in hover markup and translation arguments.
+fn walk_pieces(pieces: &[Piece], visit: &mut impl FnMut(&Piece)) {
+    for piece in pieces {
+        visit(piece);
+        if let Piece::Lang { args, .. } = piece {
+            for arg in args {
+                walk_pieces(arg, visit);
+            }
+        }
+        if let Piece::Selector { separator, .. } | Piece::Nbt { separator, .. } = piece
+            && let Some(separator) = separator
+        {
+            walk_pieces(separator, visit);
+        }
+        match &piece.style().hover {
+            Some(HoverIr::Text(inner)) => walk_pieces(inner, visit),
+            Some(HoverIr::Entity {
+                name: Some(name), ..
+            }) => walk_pieces(name, visit),
+            _ => {}
+        }
+    }
+}
+
+/// The span of the first `{@const …}` hole in `pieces`.
+fn const_splice_span(pieces: &[Piece], lit: &LitStr) -> Option<proc_macro2::Span> {
+    let mut found = None;
+    walk_holes(pieces, &mut |arg, usage| {
+        if found.is_none()
+            && matches!(usage, Usage::Const)
+            && let HoleArg::Named { range, .. } = arg
+        {
+            found = Some(precise_span(lit, *range).unwrap_or_else(|| lit.span()));
+        }
+    });
+    found
+}
+
+/// A `{@const …}` splice is encoded bytes, but the hover of a `{@…}` component hole is built as a
+/// [`HoverEvent`] at runtime, which holds a component instead.
+pub(crate) fn reject_const_splice_in_hole_hover(
+    pieces: &[Piece],
+    lit: &LitStr,
+) -> Result<(), syn::Error> {
+    let mut failed = None;
+    walk_pieces(pieces, &mut |piece| {
+        if failed.is_none()
+            && let Piece::Hole {
+                kind: HoleKind::Component,
+                style,
+                ..
+            } = piece
+            && let Some(HoverIr::Text(inner)) = &style.hover
+            && let Some(span) = const_splice_span(inner, lit)
+        {
+            failed = Some(syn::Error::new(
+                span,
+                "`{@const …}` cannot go in the hover of a `{@…}` hole, because that hover is \
+                 built as a component at runtime and a const splice is already-encoded bytes. \
+                 Write the hover as `{const NAME}` with a `&'static str`, or take the `{@…}` \
+                 hole out so the whole template stays const",
             ));
         }
     });

@@ -41,6 +41,8 @@ pub mod resolving;
 /// Translation keys and their arguments.
 pub mod translation;
 
+#[cfg(feature = "nbt")]
+pub use encoded_nbt::UnresolvedContent;
 pub use encoded_nbt::{EmbeddedNbtCodec, EncodedComponent, EncodedNbt};
 #[cfg(feature = "nbt")]
 pub use nbt::SpliceComponent;

@@ -1,4 +1,4 @@
-#![cfg(feature = "minimessage")]
+#![cfg(all(feature = "minimessage", feature = "nbt"))]
 #![expect(clippy::unwrap_used, reason = "tests unwrap known-good input")]
 //! Runtime parser and compile-time macros must agree on one grammar.
 
@@ -74,6 +74,58 @@ fn static_corpus_matches_macro() {
         parse("<hover:show_text:'<lang:multiplayer.player.left:\\'Notch\\'>'>hover me</hover>"),
         text!("<hover:show_text:'<lang:multiplayer.player.left:\\'Notch\\'>'>hover me</hover>")
     );
+}
+
+const GIT_HASH: &str = "abc123";
+static BUILD_NAME: &str = "Notch";
+
+#[test]
+fn const_text_holes_stay_const() {
+    const HEADER: TextComponent = text!("<gray>{const GIT_HASH}</gray>");
+    static NAMED: TextComponent = text!("<red>{const BUILD_NAME}</red>");
+    const LANG: TextComponent = text!("<lang:multiplayer.player.left:'{const GIT_HASH}'>");
+    const TAB_HEADER: TextComponent =
+        text!("<yellow>Steel</yellow> <dark_gray>{const GIT_HASH}</dark_gray>");
+
+    assert_eq!(HEADER, text!("<gray>abc123</gray>"));
+    assert_eq!(HEADER, parse("<gray>abc123</gray>"));
+    assert_eq!(NAMED, text!("<red>Notch</red>"));
+    assert_eq!(LANG, text!("<lang:multiplayer.player.left:'abc123'>"));
+    assert_eq!(
+        TAB_HEADER,
+        parse("<yellow>Steel</yellow> <dark_gray>abc123</dark_gray>")
+    );
+}
+
+#[test]
+fn const_text_holes_mix_with_runtime_holes() {
+    assert_eq!(
+        text!("<red>{const GIT_HASH}</red> {}", 5),
+        text!("<red>abc123</red> {}", 5)
+    );
+    let shade = Color::Green;
+    assert_eq!(
+        text!("<{shade}>{const GIT_HASH}</color>"),
+        text!("<{shade}>abc123</color>")
+    );
+    let template = MiniMessage::new("<red>abc123</red> {n}").unwrap();
+    assert_eq!(
+        text!("<red>{const GIT_HASH}</red> {}", 5),
+        template
+            .fill(&[("n", Value::Text("5".to_string()))])
+            .unwrap()
+    );
+}
+
+#[test]
+fn const_text_holes_are_rejected_at_runtime() {
+    let err = MiniMessage::new("<red>{const GIT_HASH}</red>").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("only works in the text! / text_nbt! macros"),
+        "{msg}"
+    );
+    assert!(msg.contains("pass the value"), "{msg}");
 }
 
 #[test]
@@ -370,10 +422,10 @@ fn event_holes_carry_whole_events() {
 }
 
 #[test]
-fn show_item_by_tag_points_at_the_event_hole() {
-    let err = MiniMessage::new("<hover:show_item:'diamond'>x</hover>").unwrap_err();
+fn show_item_components_point_at_the_event_hole() {
+    let err = MiniMessage::new("<hover:show_item:'minecraft:stone':1:'{}'>x</hover>").unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("needs runtime data"), "{msg}");
+    assert!(msg.contains("item components need runtime data"), "{msg}");
     assert!(msg.contains("<hover:{item}>"), "{msg}");
 }
 
@@ -721,6 +773,391 @@ fn fill_errors_are_helpful() {
     assert!(err.to_string().contains("needs a Color value"), "{err}");
 }
 
+#[test]
+fn static_content_tags_match_macro() {
+    assert_eq!(parse("<score:@s:kills/>"), text!("<score:@s:kills/>"));
+    assert_eq!(parse("<selector:@a/>"), text!("<selector:@a/>"));
+    assert_eq!(parse("<sel:@a:'<gray>, '/>"), text!("<sel:@a:'<gray>, '/>"));
+    assert_eq!(
+        parse("<nbt:entity:'@s':Health/>"),
+        text!("<nbt:entity:'@s':Health/>")
+    );
+    assert_eq!(
+        parse("<data:storage:'my:key':path:', ':interpret/>"),
+        text!("<data:storage:'my:key':path:', ':interpret/>")
+    );
+    assert_eq!(
+        parse("<nbt:block:'0 64 0':Items:interpret/>"),
+        text!("<nbt:block:'0 64 0':Items:interpret/>")
+    );
+    assert_eq!(
+        parse("<sprite:item/emerald/>"),
+        text!("<sprite:item/emerald/>")
+    );
+    assert_eq!(
+        parse("<sprite:'minecraft:items':item/emerald/>"),
+        text!("<sprite:'minecraft:items':item/emerald/>")
+    );
+    assert_eq!(parse("<head:Notch/>"), text!("<head:Notch/>"));
+    assert_eq!(
+        parse("<head:1f085b2d-9548-4159-a8c7-f3ccdf0c2054:false/>"),
+        text!("<head:1f085b2d-9548-4159-a8c7-f3ccdf0c2054:false/>")
+    );
+    assert_eq!(
+        parse("<head:'minecraft:textures/entity/steve'/>"),
+        text!("<head:'minecraft:textures/entity/steve'/>")
+    );
+
+    assert_eq!(
+        parse("<gold><b><head:Notch/></b></gold>"),
+        text!("<gold><b><head:Notch/></b></gold>")
+    );
+    assert_eq!(
+        parse("<aqua><sprite:'minecraft:items':item/emerald/></aqua>"),
+        text!("<aqua><sprite:'minecraft:items':item/emerald/></aqua>")
+    );
+    assert_eq!(
+        parse("<gray><i><score:@s:kills/></i></gray>"),
+        text!("<gray><i><score:@s:kills/></i></gray>")
+    );
+
+    assert_eq!(
+        parse(
+            "<gray>Online: </gray><selector:@a:', '/><gray> | kills </gray>\
+             <yellow><score:@s:kills/></yellow> <head:Notch/>"
+        ),
+        text!(
+            "<gray>Online: </gray><selector:@a:', '/><gray> | kills </gray>\
+             <yellow><score:@s:kills/></yellow> <head:Notch/>"
+        )
+    );
+}
+
+#[test]
+fn content_tags_stay_const() {
+    const HEAD: TextComponent = text!("<head:Notch/>");
+    static SPRITE: TextComponent = text!("<sprite:'minecraft:items':item/emerald/>");
+    const SCORE: TextComponent = text!("<score:@s:kills/>");
+    const SELECTOR: TextComponent = text!("<sel:@a:', '>");
+    const MOB: TextComponent = text!(
+        "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig'>x</hover>"
+    );
+    const SWORD: TextComponent = text!("<hover:show_item:'minecraft:diamond_sword':3>x</hover>");
+
+    assert_eq!(HEAD, parse("<head:Notch/>"));
+    assert_eq!(SPRITE, parse("<sprite:'minecraft:items':item/emerald/>"));
+    assert_eq!(SCORE, parse("<score:@s:kills/>"));
+    assert_eq!(SELECTOR, parse("<sel:@a:', '>"));
+    assert_eq!(
+        MOB,
+        parse(
+            "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig'>x</hover>"
+        )
+    );
+    assert_eq!(
+        SWORD,
+        parse("<hover:show_item:'minecraft:diamond_sword':3>x</hover>")
+    );
+}
+
+fn uuid_words(text: &str) -> [i32; 4] {
+    let (high, low) = uuid::Uuid::parse_str(text).unwrap().as_u64_pair();
+    [
+        ((high >> 32) & 0xFFFF_FFFF) as i32,
+        (high & 0xFFFF_FFFF) as i32,
+        ((low >> 32) & 0xFFFF_FFFF) as i32,
+        (low & 0xFFFF_FFFF) as i32,
+    ]
+}
+
+#[test]
+fn content_tags_build_the_model() {
+    use text_components::content::{Content, NbtSource, Object, Resolvable};
+
+    match &parse("<score:@s:kills/>").content {
+        Content::Resolvable(Resolvable::Scoreboard {
+            selector,
+            objective,
+        }) => {
+            assert_eq!(selector.as_ref(), "@s");
+            assert_eq!(objective.as_ref(), "kills");
+        }
+        other => panic!("expected a scoreboard value, got {other:?}"),
+    }
+
+    match &parse("<sel:@a:'<gray>, '/>").content {
+        Content::Resolvable(Resolvable::Entity {
+            selector,
+            separator: Some(separator),
+        }) => {
+            assert_eq!(selector.as_ref(), "@a");
+            assert_eq!(separator.format.color, Some(Color::Gray));
+            assert_eq!(
+                separator.content,
+                Content::from(", ".to_string()),
+                "{separator:?}"
+            );
+        }
+        other => panic!("expected an entity selector, got {other:?}"),
+    }
+
+    match &parse("<data:storage:'my:key':path:interpret/>").content {
+        Content::Resolvable(Resolvable::NBT {
+            path,
+            interpret,
+            plain,
+            separator,
+            source,
+        }) => {
+            assert_eq!(path.as_ref(), "path");
+            assert!(*interpret);
+            assert!(!*plain);
+            assert!(separator.is_none());
+            assert!(matches!(source, NbtSource::Storage(id) if id == "my:key"));
+        }
+        other => panic!("expected NBT content, got {other:?}"),
+    }
+
+    match &parse("<sprite:item/emerald/>").content {
+        Content::Object(Object::Atlas {
+            atlas,
+            sprite,
+            fallback: None,
+        }) => {
+            assert_eq!(atlas.as_ref(), "minecraft:blocks");
+            assert_eq!(sprite.as_ref(), "item/emerald");
+        }
+        other => panic!("expected an atlas sprite, got {other:?}"),
+    }
+
+    match &parse("<head:1f085b2d-9548-4159-a8c7-f3ccdf0c2054:false/>").content {
+        Content::Object(Object::Player {
+            player,
+            hat: false,
+            fallback: None,
+        }) => {
+            assert_eq!(
+                player.id,
+                Some(uuid_words("1f085b2d-9548-4159-a8c7-f3ccdf0c2054"))
+            );
+            assert!(player.name.is_none());
+        }
+        other => panic!("expected a player head, got {other:?}"),
+    }
+
+    match &parse("<head:'minecraft:textures/entity/steve'/>").content {
+        Content::Object(Object::Player { player, hat, .. }) => {
+            assert!(*hat);
+            assert_eq!(
+                player.texture.as_deref(),
+                Some("minecraft:textures/entity/steve")
+            );
+        }
+        other => panic!("expected a player head, got {other:?}"),
+    }
+}
+
+#[test]
+fn separator_and_entity_name_take_holes() {
+    let template = MiniMessage::new("<sel:@a:'<gray>{sep}'/>").unwrap();
+    assert_eq!(template.holes().collect::<Vec<_>>(), ["sep"]);
+    let filled = template.fill(&[("sep", ", ".into())]).unwrap();
+    let sep = ", ".to_string();
+    assert_eq!(filled, text!("<sel:@a:'<gray>{sep}'/>"));
+
+    let template = MiniMessage::new("<nbt:entity:'@s':Health:'{sep}'/>").unwrap();
+    assert_eq!(template.holes().collect::<Vec<_>>(), ["sep"]);
+    let filled = template.fill(&[("sep", ", ".into())]).unwrap();
+    let sep = ", ".to_string();
+    assert_eq!(filled, text!("<nbt:entity:'@s':Health:'{sep}'/>"));
+
+    let template = MiniMessage::new(
+        "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig {name}'>\
+         x</hover>",
+    )
+    .unwrap();
+    assert_eq!(template.holes().collect::<Vec<_>>(), ["name"]);
+    let filled = template.fill(&[("name", "Notch".into())]).unwrap();
+    let name = "Notch".to_string();
+    assert_eq!(
+        filled,
+        text!(
+            "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig {name}'>\
+             x</hover>"
+        )
+    );
+
+    assert_eq!(text!("<sel:@a:'{}'/>", ", "), text!("<sel:@a:', '/>"));
+}
+
+#[test]
+fn hover_item_and_entity_match_macro() {
+    use text_components::content::Content;
+    use text_components::interactivity::HoverEvent;
+
+    let one = parse("<hover:show_item:'minecraft:diamond_sword'>x</hover>");
+    assert_eq!(
+        one,
+        text!("<hover:show_item:'minecraft:diamond_sword'>x</hover>")
+    );
+    match one.interactions.hover.as_deref() {
+        Some(HoverEvent::ShowItem {
+            id,
+            count,
+            components,
+        }) => {
+            assert_eq!(id.as_ref(), "minecraft:diamond_sword");
+            assert_eq!(*count, 1);
+            assert!(components.is_none());
+        }
+        other => panic!("expected show_item, got {other:?}"),
+    }
+
+    let three = parse("<hover:show_item:'minecraft:diamond_sword':3>x</hover>");
+    assert_eq!(
+        three,
+        text!("<hover:show_item:'minecraft:diamond_sword':3>x</hover>")
+    );
+    match three.interactions.hover.as_deref() {
+        Some(HoverEvent::ShowItem { count, .. }) => assert_eq!(*count, 3),
+        other => panic!("expected show_item, got {other:?}"),
+    }
+
+    let bare =
+        parse("<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054>x</hover>");
+    assert_eq!(
+        bare,
+        text!("<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054>x</hover>")
+    );
+    match bare.interactions.hover.as_deref() {
+        Some(HoverEvent::ShowEntity { name, id, uuid }) => {
+            assert!(name.is_none());
+            assert_eq!(id.as_ref(), "minecraft:pig");
+            assert_eq!(
+                *uuid,
+                uuid::Uuid::parse_str("1f085b2d-9548-4159-a8c7-f3ccdf0c2054").unwrap()
+            );
+        }
+        other => panic!("expected show_entity, got {other:?}"),
+    }
+
+    let named = parse(
+        "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig'>x</hover>",
+    );
+    assert_eq!(
+        named,
+        text!(
+            "<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig'>x</hover>"
+        )
+    );
+    match named.interactions.hover.as_deref() {
+        Some(HoverEvent::ShowEntity {
+            name: Some(name), ..
+        }) => assert_eq!(name.content, Content::from("Pig".to_string())),
+        other => panic!("expected a named show_entity, got {other:?}"),
+    }
+}
+
+#[test]
+fn transition_picks_one_color() {
+    fn colors(component: &TextComponent) -> Vec<Option<Color>> {
+        if component.children.is_empty() {
+            vec![component.format.color.clone()]
+        } else {
+            component
+                .children
+                .iter()
+                .map(|child| child.format.color.clone())
+                .collect()
+        }
+    }
+
+    let half = parse("<transition:#000000:#ffffff:0.5>abc</transition>");
+    assert!(
+        colors(&half)
+            .iter()
+            .all(|color| *color == Some(Color::Rgb(0x80, 0x80, 0x80))),
+        "{half:?}"
+    );
+    assert_eq!(
+        half,
+        text!("<transition:#000000:#ffffff:0.5>abc</transition>")
+    );
+
+    assert_eq!(
+        colors(&parse("<transition:red:blue>x</transition>")),
+        vec![Some(Color::Rgb(0xFF, 0x55, 0x55))]
+    );
+    assert_eq!(
+        colors(&parse("<transition:red:blue:1>x</transition>")),
+        vec![Some(Color::Rgb(0x55, 0x55, 0xFF))]
+    );
+    assert_eq!(
+        parse("<transition:red:blue:-0.5>x</transition>"),
+        parse("<transition:red:blue:0.5>x</transition>")
+    );
+
+    assert_eq!(
+        parse("<gold><b><transition:red:blue:0.25>x</transition>y</b></gold>"),
+        text!("<gold><b><transition:red:blue:0.25>x</transition>y</b></gold>")
+    );
+}
+
+#[test]
+fn unresolved_content_cannot_fill_nbt() {
+    for template in [
+        "<score:a:b/>",
+        "<selector:@a/>",
+        "<nbt:entity:'@s':Health/>",
+    ] {
+        let parsed = MiniMessage::new(template).unwrap();
+        parsed.fill(&[]).unwrap();
+        let msg = parsed.fill_nbt(&[]).unwrap_err().to_string();
+        assert!(msg.contains("resolved"), "{template}: {msg}");
+    }
+
+    for template in ["<sprite:x/>", "<head:Notch/>"] {
+        let parsed = MiniMessage::new(template).unwrap();
+        let encoded = parsed.fill_nbt(&[]).unwrap();
+        assert_eq!(encoded.decode().unwrap(), parsed.fill(&[]).unwrap());
+    }
+}
+
+#[test]
+fn content_tag_errors_are_helpful() {
+    let err = MiniMessage::new("<score:a>").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("takes a holder and an objective"), "{msg}");
+    assert!(msg.contains("<score:@s:kills>"), "{msg}");
+
+    let err = MiniMessage::new("<nbt:chest:'0 0 0':Items>").unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("`chest` is not an NBT source"), "{msg}");
+    assert!(msg.contains("block, entity, storage"), "{msg}");
+
+    let err = MiniMessage::new("<head:Notch:maybe>").unwrap_err();
+    assert!(
+        err.to_string().contains("is not an outer layer flag"),
+        "{err}"
+    );
+
+    let err = MiniMessage::new("<transition:red:blue:2>x</transition>").unwrap_err();
+    assert!(
+        err.to_string().contains("not a phase between -1 and 1"),
+        "{err}"
+    );
+
+    let err = MiniMessage::new("<hover:show_entity:pig:nope>x</hover>").unwrap_err();
+    assert!(err.to_string().contains("`nope` is not a UUID"), "{err}");
+
+    let err = MiniMessage::new("<sel>").unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("takes a selector and an optional separator"),
+        "{err}"
+    );
+}
+
 #[cfg(feature = "nbt")]
 mod nbt_parity {
     use super::*;
@@ -931,6 +1368,60 @@ mod nbt_parity {
             .fill_nbt(&[])
             .unwrap();
         assert_eq!(H, runtime);
+    }
+
+    #[test]
+    fn const_text_holes_fold_into_rodata() {
+        const HEADER: EncodedComponent = text_nbt!("<gray>{const GIT_HASH}</gray>");
+        const LANG: EncodedComponent =
+            text_nbt!("<lang:multiplayer.player.left:'{const GIT_HASH}'>");
+        const BARE: EncodedComponent = text_nbt!("{const GIT_HASH}");
+        const NAMED: EncodedComponent = text_nbt!("<red>{const BUILD_NAME}</red>");
+        const TAB_HEADER: EncodedComponent =
+            text_nbt!("\n<yellow>Steel Dev Build ({const GIT_HASH})</yellow>\n");
+
+        assert_eq!(HEADER, text_nbt!("<gray>abc123</gray>"));
+        assert_eq!(BARE, text_nbt!("abc123"));
+        assert_eq!(NAMED, text_nbt!("<red>Notch</red>"));
+
+        // a const text hole is its own piece, so it never merges with the text beside it
+        let hash = || vec![("hash", Value::Text(GIT_HASH.to_string()))];
+        parity("<gray>{hash}</gray>", &hash(), &HEADER);
+        parity("<lang:multiplayer.player.left:'{hash}'>", &hash(), &LANG);
+        parity(
+            "\n<yellow>Steel Dev Build ({hash})</yellow>\n",
+            &hash(),
+            &TAB_HEADER,
+        );
+    }
+
+    #[test]
+    fn const_text_holes_encode_mutf8() {
+        const ODD: &str = "h\u{e9}llo\u{20ac} \u{1d11e} \0 end";
+        const MIXED: EncodedComponent = text_nbt!("<gray>{const ODD}</gray>");
+
+        assert_eq!(
+            MIXED,
+            text_nbt!("<gray>h\u{e9}llo\u{20ac} \u{1d11e} \0 end</gray>")
+        );
+        parity(
+            "<gray>{odd}</gray>",
+            &[("odd", Value::Text(ODD.to_string()))],
+            &MIXED,
+        );
+    }
+
+    #[test]
+    fn const_text_holes_mix_with_runtime_holes_in_nbt() {
+        let name = "Notch".to_string();
+        parity(
+            "<gray>{hash}</gray><red>{name}</red>",
+            &[
+                ("hash", Value::Text(GIT_HASH.to_string())),
+                ("name", Value::Text(name.clone())),
+            ],
+            &text_nbt!("<gray>{const GIT_HASH}</gray><red>{name}</red>"),
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use syn::LitStr;
 use text_components_grammar::nbt::{NbtSeg, SplicePos};
 use text_components_grammar::{
-    self as grammar, BoolIr, ClickIr, ClickKind, ColorIr, HoleArg, HoleKind, HoverIr, LangKey,
-    Piece, StrSeg, Style,
+    self as grammar, BoolIr, ClickIr, ClickKind, ColorIr, HeadIr, HoleArg, HoleKind, HoverIr,
+    LangKey, NbtSourceIr, Piece, StrSeg, Style,
 };
 
 use crate::analysis::{
@@ -66,7 +66,9 @@ impl Codegen {
             Usage::Borrow => quote_spanned!(span=> &#id),
             Usage::Consume if last => quote!(#id),
             Usage::Consume => quote!(::core::clone::Clone::clone(&#id)),
-            Usage::Const => unreachable!("a const splice has no expression to evaluate"),
+            Usage::Const | Usage::ConstText => {
+                unreachable!("a const hole names its const directly")
+            }
         }
     }
 
@@ -105,6 +107,15 @@ impl Codegen {
                             quote!(::text_components::__private::SplicePart::Entry(#entry, #bytes_id))
                         }
                     });
+                }
+                NbtSeg::ConstText(arg) => {
+                    let name = self.arg_ident(arg);
+                    let span = name.span();
+                    let str_id = self.fresh("SPLICESTR");
+                    items.push(quote_spanned! {span=>
+                        const #str_id: &str = #name;
+                    });
+                    parts.push(quote!(::text_components::__private::SplicePart::Str(#str_id)));
                 }
                 _ => unreachable!("a static run holds bytes and const splices"),
             }
@@ -328,6 +339,68 @@ impl Codegen {
                     ))
                 ))
             }
+            Some(HoverIr::Item { id, count }) => {
+                let ev_id = self.fresh("HOVER");
+                self.statics.push(quote! {
+                    static #ev_id: ::text_components::interactivity::HoverEvent =
+                        ::text_components::interactivity::HoverEvent::ShowItem {
+                            id: ::std::borrow::Cow::Borrowed(#id),
+                            count: #count,
+                            components: ::core::option::Option::None,
+                        };
+                });
+                quote!(::core::option::Option::Some(
+                    ::text_components::interactivity::MaybeStatic::Static(&#ev_id)
+                ))
+            }
+            Some(HoverIr::Entity { id, uuid, name })
+                if !name.as_deref().is_some_and(grammar::pieces_have_dyn) =>
+            {
+                let name_expr = match name {
+                    None => quote!(::core::option::Option::None),
+                    Some(pieces) => {
+                        let value = self.static_component_tokens(pieces);
+                        let val_id = self.fresh("HOVERNAME");
+                        self.statics.push(quote! {
+                            static #val_id: ::text_components::TextComponent = #value;
+                        });
+                        quote!(::core::option::Option::Some(
+                            ::text_components::interactivity::MaybeStatic::Static(&#val_id)
+                        ))
+                    }
+                };
+                let uuid = uuid_tokens(*uuid);
+                let ev_id = self.fresh("HOVER");
+                self.statics.push(quote! {
+                    static #ev_id: ::text_components::interactivity::HoverEvent =
+                        ::text_components::interactivity::HoverEvent::ShowEntity {
+                            name: #name_expr,
+                            id: ::std::borrow::Cow::Borrowed(#id),
+                            uuid: #uuid,
+                        };
+                });
+                quote!(::core::option::Option::Some(
+                    ::text_components::interactivity::MaybeStatic::Static(&#ev_id)
+                ))
+            }
+            Some(HoverIr::Entity { id, uuid, name }) => {
+                let name = name.as_deref().expect("a dynamic entity name is present");
+                let value = self.component_expr(name);
+                let uuid = uuid_tokens(*uuid);
+                quote!(::core::option::Option::Some(
+                    ::text_components::interactivity::MaybeStatic::Owned(::std::boxed::Box::new(
+                        ::text_components::interactivity::HoverEvent::ShowEntity {
+                            name: ::core::option::Option::Some(
+                                ::text_components::interactivity::MaybeStatic::Owned(
+                                    ::std::boxed::Box::new(#value),
+                                ),
+                            ),
+                            id: ::std::borrow::Cow::Borrowed(#id),
+                            uuid: #uuid,
+                        },
+                    ))
+                ))
+            }
         };
         quote!(::text_components::interactivity::Interactivity {
             insertion: #insertion,
@@ -370,10 +443,25 @@ impl Codegen {
         self.content_leaf_tokens(content, style)
     }
 
+    /// `{const NAME}`: the const is named where the text would be.
+    pub(crate) fn const_text_tokens(&mut self, arg: &HoleArg, style: &Style) -> Ts {
+        let name = self.arg_ident(arg);
+        let span = name.span();
+        let content = quote_spanned!(span=> ::text_components::content::Content::Text {
+            text: ::std::borrow::Cow::Borrowed(#name),
+        });
+        self.content_leaf_tokens(content, style)
+    }
+
     pub(crate) fn static_leaf_tokens(&mut self, piece: &Piece, style: &Style) -> Ts {
         match piece {
             Piece::Keybind { key, .. } => self.keybind_tokens(key, style),
             Piece::Text { text, .. } => self.leaf_tokens(text, style),
+            Piece::Hole {
+                arg,
+                kind: HoleKind::ConstText,
+                ..
+            } => self.const_text_tokens(arg, style),
             Piece::Lang {
                 key: LangKey::Lit(key),
                 fallback,
@@ -411,9 +499,114 @@ impl Codegen {
                 ));
                 self.content_leaf_tokens(content, style)
             }
+            Piece::Score {
+                name, objective, ..
+            } => {
+                let content = quote!(::text_components::content::Content::Resolvable(
+                    ::text_components::content::Resolvable::Scoreboard {
+                        selector: ::std::borrow::Cow::Borrowed(#name),
+                        objective: ::std::borrow::Cow::Borrowed(#objective),
+                    }
+                ));
+                self.content_leaf_tokens(content, style)
+            }
+            Piece::Selector {
+                selector,
+                separator,
+                ..
+            } => {
+                let separator = self.static_separator_tokens(separator.as_deref());
+                let content = quote!(::text_components::content::Content::Resolvable(
+                    ::text_components::content::Resolvable::Entity {
+                        selector: ::std::borrow::Cow::Borrowed(#selector),
+                        separator: #separator,
+                    }
+                ));
+                self.content_leaf_tokens(content, style)
+            }
+            Piece::Nbt {
+                source,
+                path,
+                interpret,
+                separator,
+                ..
+            } => {
+                let separator = self.static_separator_tokens(separator.as_deref());
+                let content = nbt_content_tokens(source, path, *interpret, &separator);
+                self.content_leaf_tokens(content, style)
+            }
+            Piece::Sprite { atlas, sprite, .. } => {
+                let content = quote!(::text_components::content::Content::Object(
+                    ::text_components::content::Object::Atlas {
+                        atlas: ::std::borrow::Cow::Borrowed(#atlas),
+                        sprite: ::std::borrow::Cow::Borrowed(#sprite),
+                        fallback: ::core::option::Option::None,
+                    }
+                ));
+                self.content_leaf_tokens(content, style)
+            }
+            Piece::Head { player, hat, .. } => {
+                let content = self.head_content_tokens(player, *hat);
+                self.content_leaf_tokens(content, style)
+            }
             Piece::Lang { .. } => unreachable!("dynamic <lang> pieces are never static leaves"),
             Piece::Hole { .. } => unreachable!("holes are not leaves"),
         }
+    }
+
+    fn static_separator_tokens(&mut self, separator: Option<&[Piece]>) -> Ts {
+        match separator {
+            None => quote!(::core::option::Option::None),
+            Some(pieces) => {
+                let value = self.static_component_tokens(pieces);
+                let id = self.fresh("SEP");
+                self.statics.push(quote! {
+                    static #id: ::text_components::TextComponent = #value;
+                });
+                quote!(::core::option::Option::Some(
+                    ::text_components::interactivity::MaybeStatic::Static(&#id)
+                ))
+            }
+        }
+    }
+
+    fn head_content_tokens(&mut self, player: &HeadIr, hat: bool) -> Ts {
+        let mut name = quote!(::core::option::Option::None);
+        let mut id = quote!(::core::option::Option::None);
+        let mut texture = quote!(::core::option::Option::None);
+        match player {
+            HeadIr::Name(value) => {
+                name = quote!(::core::option::Option::Some(::std::borrow::Cow::Borrowed(#value)));
+            }
+            HeadIr::Uuid(bytes) => {
+                let words = uuid_words(*bytes);
+                id = quote!(::core::option::Option::Some([#(#words),*]));
+            }
+            HeadIr::Texture(value) => {
+                texture =
+                    quote!(::core::option::Option::Some(::std::borrow::Cow::Borrowed(#value)));
+            }
+        }
+        let player_id = self.fresh("PLAYER");
+        self.statics.push(quote! {
+            static #player_id: ::text_components::content::ObjectPlayer =
+                ::text_components::content::ObjectPlayer {
+                    name: #name,
+                    id: #id,
+                    texture: #texture,
+                    cape: ::core::option::Option::None,
+                    elytra: ::core::option::Option::None,
+                    model: ::core::option::Option::None,
+                    properties: ::std::borrow::Cow::Borrowed(&[]),
+                };
+        });
+        quote!(::text_components::content::Content::Object(
+            ::text_components::content::Object::Player {
+                player: ::text_components::interactivity::MaybeStatic::Static(&#player_id),
+                hat: #hat,
+                fallback: ::core::option::Option::None,
+            }
+        ))
     }
 
     pub(crate) fn content_leaf_tokens(&mut self, content: Ts, style: &Style) -> Ts {
@@ -508,7 +701,8 @@ impl Codegen {
     ) -> Ts {
         let var = format_ident!("__tcm_h");
         let make = match kind {
-            HoleKind::ConstComponent => unreachable!("const holes never reach text!'s codegen"),
+            HoleKind::ConstComponent => unreachable!("const splices never reach text!'s codegen"),
+            HoleKind::ConstText => unreachable!("const text is emitted as a leaf"),
             HoleKind::Component => {
                 let expr = self.arg_expr(arg, Usage::Consume);
                 quote!(::core::convert::Into::<::text_components::TextComponent>::into(#expr))
@@ -561,8 +755,11 @@ impl Codegen {
         dyn_flag!(obfuscated);
         let events_dyn = match &style.hover {
             Some(HoverIr::Text(pieces)) => grammar::pieces_have_dyn(pieces),
+            Some(HoverIr::Entity { name, .. }) => {
+                name.as_deref().is_some_and(grammar::pieces_have_dyn)
+            }
             Some(HoverIr::Dyn(_)) => true,
-            None => false,
+            Some(HoverIr::Item { .. }) | None => false,
         } || match &style.click {
             Some(ClickIr::Action(_, segs)) => grammar::segs_have_dyn(segs),
             Some(ClickIr::Dyn(_)) => true,
@@ -662,6 +859,59 @@ impl Codegen {
         }
     }
 
+    pub(crate) fn resolvable_tokens(&mut self, piece: &Piece) -> Ts {
+        let content = match piece {
+            Piece::Selector {
+                selector,
+                separator,
+                ..
+            } => {
+                let separator = self.owned_separator_tokens(separator.as_deref());
+                quote!(::text_components::content::Content::Resolvable(
+                    ::text_components::content::Resolvable::Entity {
+                        selector: ::std::borrow::Cow::Borrowed(#selector),
+                        separator: #separator,
+                    }
+                ))
+            }
+            Piece::Nbt {
+                source,
+                path,
+                interpret,
+                separator,
+                ..
+            } => {
+                let separator = self.owned_separator_tokens(separator.as_deref());
+                nbt_content_tokens(source, path, *interpret, &separator)
+            }
+            _ => unreachable!("resolvable_tokens only takes <selector> and <nbt> pieces"),
+        };
+        let var = format_ident!("__tcm_h");
+        let fills = self.fill_tokens(piece.style(), &var);
+        quote! {
+            {
+                let mut #var: ::text_components::TextComponent =
+                    ::text_components::TextComponent::from(#content);
+                #(#fills)*
+                #var
+            }
+        }
+    }
+
+    fn owned_separator_tokens(&mut self, separator: Option<&[Piece]>) -> Ts {
+        match separator {
+            None => quote!(::core::option::Option::None),
+            Some(pieces) => {
+                let value = self.component_expr(pieces);
+                quote!(::core::option::Option::Some(
+                    ::text_components::interactivity::MaybeStatic::Owned(::std::boxed::Box::new(
+                        #value
+                    ))
+                ))
+            }
+        }
+    }
+
     pub(crate) fn component_expr(&mut self, pieces: &[Piece]) -> Ts {
         if !grammar::pieces_have_dyn(pieces) {
             return self.static_component_tokens(pieces);
@@ -669,7 +919,7 @@ impl Codegen {
         if let [
             Piece::Hole {
                 arg,
-                kind,
+                kind: kind @ (HoleKind::Text | HoleKind::Component | HoleKind::ConstComponent),
                 spec,
                 style,
                 ..
@@ -681,7 +931,25 @@ impl Codegen {
         if let [piece @ Piece::Lang { .. }] = pieces {
             return self.lang_tokens(piece);
         }
-        if let [piece @ (Piece::Text { .. } | Piece::Keybind { .. })] = pieces {
+        if let [piece] = pieces
+            && separator_has_dyn(piece)
+        {
+            return self.resolvable_tokens(piece);
+        }
+        if let [
+            piece @ (Piece::Text { .. }
+            | Piece::Keybind { .. }
+            | Piece::Score { .. }
+            | Piece::Selector { .. }
+            | Piece::Nbt { .. }
+            | Piece::Sprite { .. }
+            | Piece::Head { .. }
+            | Piece::Hole {
+                kind: HoleKind::ConstText,
+                ..
+            }),
+        ] = pieces
+        {
             return self.runtime_leaf_tokens(piece);
         }
         let n = pieces.len();
@@ -690,7 +958,7 @@ impl Codegen {
             .map(|piece| match piece {
                 Piece::Hole {
                     arg,
-                    kind,
+                    kind: kind @ (HoleKind::Text | HoleKind::Component | HoleKind::ConstComponent),
                     spec,
                     style,
                     ..
@@ -700,6 +968,10 @@ impl Codegen {
                 }
                 piece @ Piece::Lang { .. } if piece.has_dyn() => {
                     let leaf = self.lang_tokens(piece);
+                    quote!(__tcm_children.push(#leaf);)
+                }
+                piece if separator_has_dyn(piece) => {
+                    let leaf = self.resolvable_tokens(piece);
                     quote!(__tcm_children.push(#leaf);)
                 }
                 piece if piece.style().has_dyn() => {
@@ -745,6 +1017,50 @@ impl Codegen {
         });
         root_tokens(quote!(::std::borrow::Cow::Borrowed(&#parts_id)))
     }
+}
+
+fn separator_has_dyn(piece: &Piece) -> bool {
+    match piece {
+        Piece::Selector { separator, .. } | Piece::Nbt { separator, .. } => {
+            separator.as_deref().is_some_and(grammar::pieces_have_dyn)
+        }
+        _ => false,
+    }
+}
+
+fn nbt_content_tokens(source: &NbtSourceIr, path: &str, interpret: bool, separator: &Ts) -> Ts {
+    let source = match source {
+        NbtSourceIr::Block(id) => quote!(::text_components::content::NbtSource::Block(
+            ::std::borrow::Cow::Borrowed(#id)
+        )),
+        NbtSourceIr::Entity(id) => quote!(::text_components::content::NbtSource::Entity(
+            ::std::borrow::Cow::Borrowed(#id)
+        )),
+        NbtSourceIr::Storage(id) => quote!(::text_components::content::NbtSource::Storage(
+            ::std::borrow::Cow::Borrowed(#id)
+        )),
+    };
+    quote!(::text_components::content::Content::Resolvable(
+        ::text_components::content::Resolvable::NBT {
+            path: ::std::borrow::Cow::Borrowed(#path),
+            interpret: #interpret,
+            plain: false,
+            separator: #separator,
+            source: #source,
+        }
+    ))
+}
+
+fn uuid_tokens(uuid: [u8; 16]) -> Ts {
+    quote!(::text_components::interactivity::Uuid::from_bytes([#(#uuid),*]))
+}
+
+fn uuid_words(uuid: [u8; 16]) -> Vec<i32> {
+    uuid.as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| i32::from_be_bytes(*word))
+        .collect()
 }
 
 // `..expr` struct update in const position drops overwritten fields, which const-eval rejects

@@ -4,7 +4,8 @@
 use std::{error::Error, fmt};
 
 use crate::{
-    BoolIr, ClickIr, ClickKind, ColorIr, HoleArg, HoleKind, HoverIr, LangKey, Piece, StrSeg, Style,
+    BoolIr, ClickIr, ClickKind, ColorIr, HeadIr, HoleArg, HoleKind, HoverIr, LangKey, Piece,
+    StrSeg, Style,
 };
 
 /// A template the NBT format cannot represent.
@@ -47,6 +48,27 @@ pub(crate) const TAG_INT: u8 = 3;
 pub(crate) const TAG_STRING: u8 = 8;
 pub(crate) const TAG_LIST: u8 = 9;
 pub(crate) const TAG_COMPOUND: u8 = 10;
+pub(crate) const TAG_INT_ARRAY: u8 = 11;
+
+/// Content the server has to resolve before it can be encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unresolved {
+    Scoreboard,
+    Entity,
+    Nbt,
+}
+
+impl Unresolved {
+    /// The tag that produced it.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Scoreboard => "score",
+            Self::Entity => "selector",
+            Self::Nbt => "nbt",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NbtSeg {
@@ -70,10 +92,17 @@ pub enum NbtSeg {
         arg: HoleArg,
         at: SplicePos,
     },
+    /// `{const NAME}`: a `const &str` the macro folds in as a static NBT string value.
+    ConstText(HoleArg),
     /// `<hover:{item}>` / `<click:{cmd}>`: the event's compound payload is encoded at runtime.
     EventHole {
         arg: HoleArg,
         kind: EventKind,
+    },
+    /// `<score>`, `<selector>`, `<nbt>`: content only resolution can encode; the consumer reports it.
+    Unresolved {
+        what: Unresolved,
+        range: (usize, usize),
     },
     /// `<lang:{}:…>`: the runtime writes the u16 length + key of a `Translation<arity>`.
     LangKey {
@@ -221,11 +250,22 @@ impl NbtEmitter {
         self.at = Some(piece.range());
         match piece {
             Piece::Text { text, .. } => self.mutf8(text)?,
+            Piece::Hole {
+                kind: HoleKind::ConstText,
+                arg,
+                ..
+            } => self.segs.push(NbtSeg::ConstText(arg.clone())),
             Piece::Hole { arg, spec, .. } => {
                 self.segs.push(NbtSeg::Hole(arg.clone(), spec.clone()));
             }
-            Piece::Keybind { .. } | Piece::Lang { .. } => {
-                unreachable!("keybinds and translations are never bare")
+            Piece::Keybind { .. }
+            | Piece::Lang { .. }
+            | Piece::Score { .. }
+            | Piece::Selector { .. }
+            | Piece::Nbt { .. }
+            | Piece::Sprite { .. }
+            | Piece::Head { .. } => {
+                unreachable!("keybinds, translations and content pieces are never bare")
             }
         }
         Ok(())
@@ -361,6 +401,51 @@ impl NbtEmitter {
                 args,
                 ..
             } => self.lang_content(key, fallback.as_ref(), args)?,
+            Piece::Score { range, .. } => {
+                self.segs.push(NbtSeg::Unresolved {
+                    what: Unresolved::Scoreboard,
+                    range: *range,
+                });
+                return Ok(());
+            }
+            Piece::Selector { range, .. } => {
+                self.segs.push(NbtSeg::Unresolved {
+                    what: Unresolved::Entity,
+                    range: *range,
+                });
+                return Ok(());
+            }
+            Piece::Nbt { range, .. } => {
+                self.segs.push(NbtSeg::Unresolved {
+                    what: Unresolved::Nbt,
+                    range: *range,
+                });
+                return Ok(());
+            }
+            Piece::Sprite { atlas, sprite, .. } => {
+                if atlas != "minecraft:blocks" {
+                    self.string_entry("atlas", atlas)?;
+                }
+                self.string_entry("sprite", sprite)?;
+            }
+            Piece::Head { player, hat, .. } => {
+                self.entry(TAG_COMPOUND, "player")?;
+                match player {
+                    HeadIr::Name(name) => self.string_entry("name", name)?,
+                    HeadIr::Uuid(uuid) => {
+                        self.entry(TAG_INT_ARRAY, "id")?;
+                        let buf = self.buf();
+                        buf.extend_from_slice(&4i32.to_be_bytes());
+                        buf.extend_from_slice(uuid);
+                    }
+                    HeadIr::Texture(texture) => self.string_entry("texture", texture)?,
+                }
+                self.u8(0);
+                if !hat {
+                    self.entry(TAG_BYTE, "hat")?;
+                    self.u8(0);
+                }
+            }
             _ => {
                 self.entry(TAG_STRING, "text")?;
                 self.bare_payload(piece)?;
@@ -368,6 +453,64 @@ impl NbtEmitter {
         }
         self.style_entries(piece.style())?;
         self.u8(0);
+        Ok(())
+    }
+
+    /// The hover entry of a compound, in `HoverEvent::to_nbt_tag` field order.
+    fn hover_entry(&mut self, hover: &HoverIr) -> Result<(), EmitError> {
+        match hover {
+            HoverIr::Dyn(arg) => {
+                self.entry(TAG_COMPOUND, "hover_event")?;
+                self.segs.push(NbtSeg::EventHole {
+                    arg: arg.clone(),
+                    kind: EventKind::Hover,
+                });
+            }
+            HoverIr::Item { id, count } => {
+                self.entry(TAG_COMPOUND, "hover_event")?;
+                self.string_entry("action", "show_item")?;
+                self.string_entry("id", id)?;
+                if *count != 1 {
+                    self.entry(TAG_INT, "count")?;
+                    self.buf().extend_from_slice(&count.to_be_bytes());
+                }
+                self.u8(0);
+            }
+            HoverIr::Entity { id, uuid, name } => {
+                self.entry(TAG_COMPOUND, "hover_event")?;
+                self.string_entry("action", "show_entity")?;
+                self.string_entry("id", id)?;
+                self.entry(TAG_INT_ARRAY, "uuid")?;
+                let buf = self.buf();
+                buf.extend_from_slice(&4i32.to_be_bytes());
+                buf.extend_from_slice(uuid);
+                if let Some(name) = name {
+                    if let [piece] = &name[..]
+                        && let Some(hole) = ComponentHole::of(piece)
+                    {
+                        self.splice(hole, SplicePos::Entry("name".to_string()))?;
+                    } else {
+                        self.entry(component_tag_type(name), "name")?;
+                        self.component_payload(name)?;
+                    }
+                }
+                self.u8(0);
+            }
+            HoverIr::Text(hover) => {
+                self.entry(TAG_COMPOUND, "hover_event")?;
+                self.string_entry("action", "show_text")?;
+                // a spliced component decides its own tag type, so its entry header waits
+                if let [piece] = &hover[..]
+                    && let Some(hole) = ComponentHole::of(piece)
+                {
+                    self.splice(hole, SplicePos::Entry("value".to_string()))?;
+                } else {
+                    self.entry(component_tag_type(hover), "value")?;
+                    self.component_payload(hover)?;
+                }
+                self.u8(0);
+            }
+        }
         Ok(())
     }
 
@@ -411,31 +554,10 @@ impl NbtEmitter {
         if let Some(segs) = &style.insertion {
             self.str_value("insertion", segs)?;
         }
-        match &style.hover {
-            None => {}
-            Some(HoverIr::Dyn(arg)) => {
-                self.entry(TAG_COMPOUND, "hover_event")?;
-                self.segs.push(NbtSeg::EventHole {
-                    arg: arg.clone(),
-                    kind: EventKind::Hover,
-                });
-            }
-            Some(HoverIr::Text(hover)) => {
-                self.entry(TAG_COMPOUND, "hover_event")?;
-                self.string_entry("action", "show_text")?;
-                // a spliced component decides its own tag type, so its entry header waits
-                if let [piece] = &hover[..]
-                    && let Some(hole) = ComponentHole::of(piece)
-                {
-                    self.splice(hole, SplicePos::Entry("value".to_string()))?;
-                } else {
-                    self.entry(component_tag_type(hover), "value")?;
-                    self.component_payload(hover)?;
-                }
-                self.u8(0);
-                // the hover's own pieces moved the cursor off this piece
-                self.at = at;
-            }
+        if let Some(hover) = &style.hover {
+            self.hover_entry(hover)?;
+            // the hover's own pieces moved the cursor off this piece
+            self.at = at;
         }
         match &style.click {
             None => {}

@@ -20,7 +20,9 @@ mod parse;
 /// let hearts = 9.5_f32;
 /// let msg = text!("<red>{name}</red><gray> is on </gray><red>{hearts:.1} HP</red>");
 ///
-/// const HEADER: TextComponent = text!("<yellow><b>Steel</b></yellow>");
+/// const GIT_HASH: &str = "a1b2c3d";
+/// const HEADER: TextComponent =
+///     text!("<yellow><b>Steel</b></yellow> <dark_gray>{const GIT_HASH}</dark_gray>");
 /// ```
 ///
 /// The first argument is a string literal template. Positional holes `{}` are
@@ -28,13 +30,16 @@ mod parse;
 /// variable `name` from the surrounding scope. Too many or too few arguments is
 /// a compile error. A syntax error in the template is a compile error that
 /// points at the place inside the string literal and carries a help line.
-/// A template without holes can initialize a `const` or a `static`.
+/// A template whose holes are all `{const NAME}`, or that has no holes at all,
+/// can initialize a `const` or a `static`.
 ///
 /// # Holes
 ///
 /// - `{}`, `{name}`, `{name:.2}`, `{:>8}`: any `Display` value (just like format!)
 /// - `{@}`, `{@name}`: anything `Into<TextComponent>`. The value is moved. If
 ///   the same name is used more than once, the earlier uses clone it.
+/// - `{const NAME}`: `NAME` is a `const &str` in scope, spliced as text at
+///   compile time. Both macros stay const-capable.
 /// - `<{color}>`, `<{}>`: a `Color` or a `&Color`. Close with `</color>`.
 /// - `<b:{flag}>`, and the same for `i`, `u`, `st`, `obf`: a `bool`.
 /// - `<hover:{event}>`: anything `Into<HoverEvent>`
@@ -51,7 +56,10 @@ mod parse;
 /// - `<font:minecraft:uniform>`
 /// - `<shadow:#AARRGGBB>`, `<shadow:red:0.5>` also `#RRGGBB` or a color name. `<!shadow>` turns it off
 /// - `<gradient:red:#f79459>` with two or more stops, and `<rainbow>`
+/// - `<transition:red:blue:0.5>`, one color of a gradient picked by the phase
 /// - `<hover:show_text:'...'>`
+/// - `<hover:show_item:'minecraft:diamond_sword':3>`
+/// - `<hover:show_entity:'minecraft:pig':1f085b2d-9548-4159-a8c7-f3ccdf0c2054:'Pig'>`
 /// - `<click:open_url:'...'>`, `<click:run_command:'...'>`,
 ///   `<click:suggest_command:'...'>`, `<click:copy_to_clipboard:'...'>`,
 ///   `<click:change_page:'3'>` (an integer, no holes),
@@ -60,6 +68,12 @@ mod parse;
 /// - `<key:key.jump>`
 /// - `<lang:key:'arg':'arg'>`
 /// - `<lang_or:key:'fallback':'arg'>`, the fallback is shown when the client doesn't know that translation
+/// - `<score:name:objective/>`
+/// - `<selector:@a>`, `<sel:@a:', '>`
+/// - `<nbt:entity:'@s':Health/>`, `<data:storage:'my:key':path:', ':interpret/>`
+/// - `<score>`, `<selector>` and `<nbt>` need resolving before sending, `text_nbt!` rejects them
+/// - `<sprite:item/emerald/>`, `<sprite:'minecraft:items':item/emerald/>`
+/// - `<head:Notch/>`, `<head:1f085b2d-9548-4159-a8c7-f3ccdf0c2054:false/>`
 /// - `<newline>`, `<br>` insert `\n`
 /// - `<reset>` closes every open tag
 /// - `<tag/>` closes itself right away
@@ -82,18 +96,23 @@ pub fn text(input: TokenStream) -> TokenStream {
 /// let tps = 19.87_f32;
 /// let msg = text_nbt!("<gray>TPS: </gray><green>{tps:.1}</green>");
 ///
-/// const HEADER: EncodedComponent = text_nbt!("\n<yellow>Steel Dev Build</yellow>\n");
+/// const GIT_HASH: &str = "a1b2c3d";
+/// const HEADER: EncodedComponent =
+///     text_nbt!("\n<yellow>Steel Dev Build ({const GIT_HASH})</yellow>\n");
 /// ```
 ///
 /// Same template syntax and argument rules as [`text!`]. What differs:
 ///
-/// - Without holes, the bytes are computed at compile time and nothing is
-///   allocated at run time.
+/// - Without holes, or with only `{const NAME}` / `{@const NAME}` holes, the
+///   bytes are computed at compile time and nothing is allocated at run time.
 /// - `{@}` and `{@name}` also accept an `EncodedComponent`. Its bytes are
 ///   copied in without decoding.
 /// - `{@const NAME}`: `NAME` is a `const EncodedComponent` in scope, and its
 ///   bytes are copied into the template at compile time. Only `text_nbt!`
 ///   accepts this. Prefer it over `{@NAME}` for consts.
+/// - `{const NAME}`: `NAME` is a `const &str` in scope, and its MUTF-8 bytes
+///   are folded into the template at compile time. It stays a piece of its
+///   own, so the text beside it keeps its own NBT string.
 #[proc_macro]
 pub fn text_nbt(input: TokenStream) -> TokenStream {
     expand::text_nbt(input)

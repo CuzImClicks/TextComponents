@@ -18,6 +18,8 @@ pub enum HoleKind {
     Component,
     /// `{@const NAME}` — a `const` component whose bytes are folded in at compile time.
     ConstComponent,
+    /// `{const NAME}` — a `const &str` spliced as literal text.
+    ConstText,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -74,8 +76,34 @@ pub enum ClickKind {
 pub enum HoverIr {
     /// `<hover:show_text:'…'>` — full markup, holes included.
     Text(Vec<Piece>),
+    /// `<hover:show_item:'minecraft:diamond_sword':3>`.
+    Item { id: String, count: i32 },
+    /// `<hover:show_entity:'minecraft:pig':uuid:'name'>` — the name its own template.
+    Entity {
+        id: String,
+        /// Big-endian bytes, as `Uuid::as_bytes`.
+        uuid: [u8; 16],
+        name: Option<Vec<Piece>>,
+    },
     /// `<hover:{item}>` — a whole `HoverEvent` supplied at runtime.
     Dyn(HoleArg),
+}
+
+/// Where `<nbt:…>` reads from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum NbtSourceIr {
+    Block(String),
+    Entity(String),
+    Storage(String),
+}
+
+/// How `<head:…>` names the player.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HeadIr {
+    Name(String),
+    /// Big-endian bytes, as `Uuid::as_bytes`.
+    Uuid([u8; 16]),
+    Texture(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,8 +155,9 @@ impl Style {
             || self.insertion.as_ref().is_some_and(|s| segs_have_dyn(s))
             || match &self.hover {
                 Some(HoverIr::Text(pieces)) => pieces_have_dyn(pieces),
+                Some(HoverIr::Entity { name, .. }) => name.as_deref().is_some_and(pieces_have_dyn),
                 Some(HoverIr::Dyn(_)) => true,
-                None => false,
+                Some(HoverIr::Item { .. }) | None => false,
             }
             || match &self.click {
                 Some(ClickIr::Action(_, segs)) => segs_have_dyn(segs),
@@ -181,6 +210,43 @@ pub enum Piece {
         style: Style,
         range: (usize, usize),
     },
+    /// `<score:name:objective>` — a scoreboard value the server resolves.
+    Score {
+        name: String,
+        objective: String,
+        style: Style,
+        range: (usize, usize),
+    },
+    /// `<selector:@a[:separator]>` — the entities a selector matches, the separator its own template.
+    Selector {
+        selector: String,
+        separator: Option<Vec<Piece>>,
+        style: Style,
+        range: (usize, usize),
+    },
+    /// `<nbt:entity:'@s':Health[:separator][:interpret]>` — NBT data the server resolves.
+    Nbt {
+        source: NbtSourceIr,
+        path: String,
+        interpret: bool,
+        separator: Option<Vec<Piece>>,
+        style: Style,
+        range: (usize, usize),
+    },
+    /// `<sprite[:atlas]:sprite>` — an atlas sprite drawn inline.
+    Sprite {
+        atlas: String,
+        sprite: String,
+        style: Style,
+        range: (usize, usize),
+    },
+    /// `<head:name|uuid|texture[:outer_layer]>` — a player head drawn inline.
+    Head {
+        player: HeadIr,
+        hat: bool,
+        style: Style,
+        range: (usize, usize),
+    },
     Hole {
         arg: HoleArg,
         kind: HoleKind,
@@ -196,6 +262,11 @@ impl Piece {
     #[must_use]
     pub fn has_dyn(&self) -> bool {
         match self {
+            Piece::Hole {
+                kind: HoleKind::ConstText,
+                style,
+                ..
+            } => style.has_dyn(),
             Piece::Hole { .. } => true,
             Piece::Lang {
                 key,
@@ -209,6 +280,12 @@ impl Piece {
                     || args.iter().any(|arg| pieces_have_dyn(arg))
                     || style.has_dyn()
             }
+            Piece::Selector {
+                separator, style, ..
+            }
+            | Piece::Nbt {
+                separator, style, ..
+            } => separator.as_deref().is_some_and(pieces_have_dyn) || style.has_dyn(),
             other => other.style().has_dyn(),
         }
     }
@@ -219,6 +296,11 @@ impl Piece {
             Piece::Text { style, .. }
             | Piece::Keybind { style, .. }
             | Piece::Lang { style, .. }
+            | Piece::Score { style, .. }
+            | Piece::Selector { style, .. }
+            | Piece::Nbt { style, .. }
+            | Piece::Sprite { style, .. }
+            | Piece::Head { style, .. }
             | Piece::Hole { style, .. } => style,
         }
     }
@@ -229,6 +311,11 @@ impl Piece {
             Piece::Text { range, .. }
             | Piece::Keybind { range, .. }
             | Piece::Lang { range, .. }
+            | Piece::Score { range, .. }
+            | Piece::Selector { range, .. }
+            | Piece::Nbt { range, .. }
+            | Piece::Sprite { range, .. }
+            | Piece::Head { range, .. }
             | Piece::Hole { range, .. } => *range,
         }
     }
@@ -238,6 +325,11 @@ impl Piece {
             Piece::Text { style, .. }
             | Piece::Keybind { style, .. }
             | Piece::Lang { style, .. }
+            | Piece::Score { style, .. }
+            | Piece::Selector { style, .. }
+            | Piece::Nbt { style, .. }
+            | Piece::Sprite { style, .. }
+            | Piece::Head { style, .. }
             | Piece::Hole { style, .. } => style,
         }
     }
@@ -259,7 +351,12 @@ impl Piece {
                 ..
             }
             | Piece::Keybind { .. }
-            | Piece::Lang { .. } => false,
+            | Piece::Lang { .. }
+            | Piece::Score { .. }
+            | Piece::Selector { .. }
+            | Piece::Nbt { .. }
+            | Piece::Sprite { .. }
+            | Piece::Head { .. } => false,
             _ => *self.style() == Style::default(),
         }
     }

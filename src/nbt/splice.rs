@@ -102,6 +102,8 @@ pub enum SplicePart<'a> {
     Elem(&'a [u8]),
     /// The name goes in as it stands, so it has to be ASCII.
     Entry(&'a str, &'a [u8]),
+    /// The value of an NBT string field: u16 BE length + MUTF-8 payload.
+    Str(&'a str),
 }
 
 /// The size of the array [`splice_bytes`] fills for these parts.
@@ -121,6 +123,7 @@ pub const fn splice_len(parts: &[SplicePart]) -> usize {
                 splice_tag(bytes);
                 bytes.len() + 2 + name.len()
             }
+            SplicePart::Str(text) => 2 + mutf8_len(text),
         };
         i += 1;
     }
@@ -152,6 +155,7 @@ pub const fn splice_bytes<const N: usize>(parts: &[SplicePart]) -> [u8; N] {
                 let named = write_name(&mut out, at + 1, name);
                 copy(&mut out, named, bytes, 1)
             }
+            SplicePart::Str(text) => write_mutf8_const(&mut out, at, text),
         };
         i += 1;
     }
@@ -160,6 +164,91 @@ pub const fn splice_bytes<const N: usize>(parts: &[SplicePart]) -> [u8; N] {
         "spliced run does not fill the array splice_len sized for it"
     );
     out
+}
+
+/// How many bytes the MUTF-8 of a string takes, without the length prefix.
+const fn mutf8_len(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut len = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        len += mutf8_size(bytes[i]);
+        i += utf8_step(bytes[i]);
+    }
+    assert!(
+        len <= u16::MAX as usize,
+        "const text is over the 65535 bytes an NBT string can carry"
+    );
+    len
+}
+
+/// The length of the UTF-8 sequence a leading byte opens.
+const fn utf8_step(lead: u8) -> usize {
+    if lead < 0x80 {
+        1
+    } else if lead < 0xE0 {
+        2
+    } else if lead < 0xF0 {
+        3
+    } else {
+        4
+    }
+}
+
+/// What that sequence becomes in MUTF-8: NUL grows, supplementary code points become a pair.
+const fn mutf8_size(lead: u8) -> usize {
+    if lead == 0 {
+        2
+    } else if lead >= 0xF0 {
+        6
+    } else {
+        utf8_step(lead)
+    }
+}
+
+/// Mirrors `write_mutf8`: u16 BE length + MUTF-8 payload.
+const fn write_mutf8_const(out: &mut [u8], at: usize, text: &str) -> usize {
+    let len = mutf8_len(text);
+    out[at] = (len >> 8) as u8;
+    out[at + 1] = len as u8;
+    let bytes = text.as_bytes();
+    let mut at = at + 2;
+    let mut i = 0;
+    while i < bytes.len() {
+        let lead = bytes[i];
+        if lead == 0 {
+            out[at] = 0xC0;
+            out[at + 1] = 0x80;
+            at += 2;
+            i += 1;
+        } else if lead < 0xF0 {
+            let n = utf8_step(lead);
+            let mut k = 0;
+            while k < n {
+                out[at + k] = bytes[i + k];
+                k += 1;
+            }
+            at += n;
+            i += n;
+        } else {
+            let c = (((lead & 0x07) as u32) << 18)
+                | (((bytes[i + 1] & 0x3F) as u32) << 12)
+                | (((bytes[i + 2] & 0x3F) as u32) << 6)
+                | ((bytes[i + 3] & 0x3F) as u32);
+            let v = c - 0x1_0000;
+            at = push3(out, at, 0xD800 + (v >> 10));
+            at = push3(out, at, 0xDC00 + (v & 0x3FF));
+            i += 4;
+        }
+    }
+    at
+}
+
+const fn push3(out: &mut [u8], at: usize, c: u32) -> usize {
+    out[at] = 0xE0 | (c >> 12) as u8;
+    out[at + 1] = 0x80 | ((c >> 6) & 0x3F) as u8;
+    out[at + 2] = 0x80 | (c & 0x3F) as u8;
+    at + 3
 }
 
 const fn splice_tag(bytes: &[u8]) -> u8 {

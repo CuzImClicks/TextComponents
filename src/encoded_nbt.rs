@@ -3,9 +3,15 @@ use simdnbt::owned::NbtTag;
 use simdnbt::owned::read_tag;
 use std::borrow::Cow;
 #[cfg(feature = "nbt")]
+use std::error::Error;
+#[cfg(feature = "nbt")]
+use std::fmt::{self, Display, Formatter};
+#[cfg(feature = "nbt")]
 use std::io::Cursor;
 
 use crate::NbtValue;
+#[cfg(feature = "nbt")]
+use crate::translation::{TranslatedMessage, Translation};
 #[cfg(feature = "nbt")]
 use crate::{TextComponent, nbt::DecodeError, resolving::TextResolutor};
 
@@ -39,6 +45,16 @@ impl EncodedComponent {
     #[must_use]
     pub fn into_bytes(self) -> Cow<'static, [u8]> {
         self.0
+    }
+
+    /// The encoded bytes read back as an NBT tag.
+    ///
+    /// # Panics
+    /// If the bytes are not valid NBT.
+    #[cfg(feature = "nbt")]
+    #[must_use]
+    pub fn to_nbt_tag(&self) -> NbtTag {
+        read_tag(&mut Cursor::new(self.as_bytes())).expect("an encoded component is valid NBT")
     }
 
     /// Decodes the bytes back into a [`TextComponent`].
@@ -97,5 +113,175 @@ impl EncodedNbt {
 
     pub(crate) const fn from_codec_output(value: NbtTag) -> Self {
         Self(NbtValue::new(value))
+    }
+}
+
+/// Content a [`TextComponent`] carries that only [resolution](TextComponent::resolve) can fill in.
+#[cfg(feature = "nbt")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UnresolvedContent {
+    /// A [`Resolvable::Scoreboard`](crate::content::Resolvable::Scoreboard) value.
+    Scoreboard,
+    /// A [`Resolvable::Entity`](crate::content::Resolvable::Entity) selector.
+    Entity,
+    /// A [`Resolvable::NBT`](crate::content::Resolvable::NBT) value.
+    Nbt,
+    /// A [`Content::Custom`](crate::content::Content::Custom) payload.
+    #[cfg(feature = "custom")]
+    Custom,
+}
+
+#[cfg(feature = "nbt")]
+impl UnresolvedContent {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Scoreboard => "a scoreboard value",
+            Self::Entity => "an entity selector",
+            Self::Nbt => "an NBT value",
+            #[cfg(feature = "custom")]
+            Self::Custom => "custom content",
+        }
+    }
+}
+
+#[cfg(feature = "nbt")]
+impl Display for UnresolvedContent {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the component contains {}, which has to be resolved before it can be encoded",
+            self.name()
+        )
+    }
+}
+
+#[cfg(feature = "nbt")]
+impl Error for UnresolvedContent {}
+
+#[cfg(feature = "nbt")]
+impl TextComponent {
+    /// Encodes this component into the network NBT a packet writes.
+    ///
+    /// [`From`] does the same and panics instead; pick whichever suits the call site.
+    ///
+    /// # Errors
+    /// If the component still holds content that needs [resolution](TextComponent::resolve).
+    pub fn try_encode(&self) -> Result<EncodedComponent, UnresolvedContent> {
+        if let Some(unresolved) = self.unresolved() {
+            return Err(unresolved);
+        }
+        let mut buf = Vec::with_capacity(128);
+        self.to_codec_nbt().write(&mut buf);
+        Ok(EncodedComponent::from_vec(buf))
+    }
+
+    /// Encodes this component into the network NBT a packet writes.
+    ///
+    /// # Panics
+    /// If the component still holds content that needs [resolution](TextComponent::resolve);
+    /// use [`try_encode`](TextComponent::try_encode) to handle that case.
+    #[must_use]
+    #[track_caller]
+    pub fn encode(&self) -> EncodedComponent {
+        match self.try_encode() {
+            Ok(encoded) => encoded,
+            Err(unresolved) => panic!("{unresolved}"),
+        }
+    }
+
+    /// The first content below this component that resolution has to fill in.
+    #[must_use]
+    pub fn unresolved(&self) -> Option<UnresolvedContent> {
+        use crate::content::{Content, Object, Resolvable};
+        use crate::interactivity::HoverEvent;
+
+        match &self.content {
+            Content::Resolvable(resolvable) => {
+                return Some(match resolvable {
+                    Resolvable::Scoreboard { .. } => UnresolvedContent::Scoreboard,
+                    Resolvable::Entity { .. } => UnresolvedContent::Entity,
+                    Resolvable::NBT { .. } => UnresolvedContent::Nbt,
+                });
+            }
+            #[cfg(feature = "custom")]
+            Content::Custom(_) => return Some(UnresolvedContent::Custom),
+            Content::Translate(message) => {
+                for arg in &message.args {
+                    if let Some(unresolved) = arg.unresolved() {
+                        return Some(unresolved);
+                    }
+                }
+            }
+            Content::Object(object) => {
+                let fallback = match object {
+                    Object::Atlas { fallback, .. } | Object::Player { fallback, .. } => fallback,
+                };
+                if let Some(fallback) = fallback
+                    && let Some(unresolved) = fallback.get().unresolved()
+                {
+                    return Some(unresolved);
+                }
+            }
+            Content::Text { .. } | Content::Keybind { .. } => {}
+        }
+
+        if let Some(hover) = &self.interactions.hover
+            && let HoverEvent::ShowText { value } = hover.get()
+            && let Some(unresolved) = value.get().unresolved()
+        {
+            return Some(unresolved);
+        }
+
+        self.children.iter().find_map(TextComponent::unresolved)
+    }
+}
+
+/// # Panics
+/// If the component holds content that needs [resolution](TextComponent::resolve);
+/// use [`try_encode`](TextComponent::try_encode) to handle that case.
+#[cfg(feature = "nbt")]
+impl From<&TextComponent> for EncodedComponent {
+    fn from(component: &TextComponent) -> Self {
+        component.encode()
+    }
+}
+
+/// # Panics
+/// If the component holds content that needs [resolution](TextComponent::resolve);
+/// use [`try_encode`](TextComponent::try_encode) to handle that case.
+#[cfg(feature = "nbt")]
+impl From<TextComponent> for EncodedComponent {
+    fn from(component: TextComponent) -> Self {
+        component.encode()
+    }
+}
+
+#[cfg(feature = "nbt")]
+impl From<&'static str> for EncodedComponent {
+    fn from(text: &'static str) -> Self {
+        TextComponent::const_plain(text).encode()
+    }
+}
+
+#[cfg(feature = "nbt")]
+impl From<String> for EncodedComponent {
+    fn from(text: String) -> Self {
+        TextComponent::plain(text).encode()
+    }
+}
+
+/// # Panics
+/// If an argument holds content that needs [resolution](TextComponent::resolve).
+#[cfg(feature = "nbt")]
+impl From<TranslatedMessage> for EncodedComponent {
+    fn from(message: TranslatedMessage) -> Self {
+        TextComponent::from(message).encode()
+    }
+}
+
+#[cfg(feature = "nbt")]
+impl From<&Translation<0>> for EncodedComponent {
+    fn from(translation: &Translation<0>) -> Self {
+        TextComponent::from(translation).encode()
     }
 }

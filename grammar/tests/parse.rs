@@ -1,9 +1,9 @@
 //! Malformed input errors instead of panicking, and equivalent spellings parse identically.
 #![expect(clippy::unwrap_used, reason = "tests unwrap known-good input")]
 
-use text_components_grammar::nbt::emit;
+use text_components_grammar::nbt::{NbtSeg, Unresolved, emit, to_mutf8};
 use text_components_grammar::{
-    ColorIr, HoleArg, HoleKind, HoverIr, Mode, Piece, StrSeg, Style, parse,
+    ColorIr, HeadIr, HoleArg, HoleKind, HoverIr, Mode, NbtSourceIr, Piece, StrSeg, Style, parse,
 };
 
 fn pieces(input: &str, mode: Mode) -> Vec<Piece> {
@@ -52,6 +52,22 @@ fn malformed_input_errors() {
         "{a²}",
         "<{a²}>x",
         "{_}",
+        "<score:a>",
+        "<score:a:b:c>",
+        "<score:{x}:b>",
+        "<selector>",
+        "<nbt:chest:'0 0 0':Items>",
+        "<nbt:entity:'@s':Health:' ':nope>",
+        "<sprite>",
+        "<sprite:a:b:c>",
+        "<head:'a name that is far too long'>",
+        "<head:Notch:maybe>",
+        "<transition:red:blue:2>",
+        "<transition:0.5>",
+        "<hover:show_entity:pig:not-a-uuid>",
+        "<hover:show_item:'minecraft:stone':many>",
+        "<hover:show_item:'minecraft:stone':1:'{}'>",
+        "<hover:show_entity:pig:1f085b2d-9548-4159-a8c7-f3ccdf0c2054:''>",
     ] {
         let Err(err) = parse(input, Mode::Runtime) else {
             panic!("{input:?} parsed but should not");
@@ -149,6 +165,79 @@ fn const_holes_name_their_const() {
         }
     ));
     assert!(parse("{@const HEADER}", Mode::Runtime).is_err());
+}
+
+#[test]
+fn const_text_holes_name_their_const() {
+    let styled = pieces("<red>{const GIT_HASH}</red>", Mode::Macro);
+    let Piece::Hole { arg, kind, .. } = &styled[0] else {
+        panic!("expected a hole, got {:?}", styled[0]);
+    };
+    assert_eq!(*kind, HoleKind::ConstText);
+    assert!(matches!(arg, HoleArg::Named { name, .. } if name == "GIT_HASH"));
+    assert!(
+        !styled[0].has_dyn(),
+        "a const text hole is not runtime data"
+    );
+
+    for input in ["{const}", "{const }", "{const A:.2}", "{const a b}"] {
+        assert!(
+            parse(input, Mode::Macro).is_err(),
+            "{input:?} parsed but should not"
+        );
+    }
+    assert!(matches!(
+        &pieces("{constant}", Mode::Macro)[0],
+        Piece::Hole {
+            kind: HoleKind::Text,
+            ..
+        }
+    ));
+    assert!(parse("{const GIT_HASH}", Mode::Runtime).is_err());
+}
+
+#[test]
+fn const_text_holes_stay_in_text_position() {
+    for input in [
+        "<insert:'{const A}'>x</insert>",
+        "<click:run_command:'{const A}'>x</click>",
+        "<lang_or:my.key:'{const A}'>",
+        "<{const A}>x",
+        "<b:{const A}>x</b>",
+    ] {
+        let Err(err) = parse(input, Mode::Macro) else {
+            panic!("{input:?} parsed but should not");
+        };
+        assert!(
+            err.render(input).contains("text position"),
+            "{input:?}: {}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn const_text_holes_take_one_gradient_position() {
+    let over_const = pieces("<gradient:red:blue>{const A}</gradient>", Mode::Macro);
+    let over_hole = pieces("<gradient:red:blue>{}</gradient>", Mode::Macro);
+    assert_eq!(over_const.len(), 1);
+    assert_eq!(over_const[0].style().color, over_hole[0].style().color);
+}
+
+#[test]
+fn const_text_holes_fill_lang_args() {
+    let lang = pieces("<lang:my.key:'{const A}'>", Mode::Macro);
+    let Piece::Lang { args, .. } = &lang[0] else {
+        panic!("expected a lang piece, got {:?}", lang[0]);
+    };
+    assert!(matches!(
+        &args[0][0],
+        Piece::Hole {
+            kind: HoleKind::ConstText,
+            ..
+        }
+    ));
+    assert!(!lang[0].has_dyn(), "a const lang arg is not runtime data");
 }
 
 #[test]
@@ -335,4 +424,191 @@ fn lang_or_carries_a_fallback() {
 
     let err = parse("<lang_or:my.key>", Mode::Runtime).unwrap_err();
     assert!(err.message.contains("needs a fallback"), "{}", err.message);
+}
+
+const NOTCH: [u8; 16] = [
+    0x1f, 0x08, 0x5b, 0x2d, 0x95, 0x48, 0x41, 0x59, 0xa8, 0xc7, 0xf3, 0xcc, 0xdf, 0x0c, 0x20, 0x54,
+];
+
+#[test]
+fn content_tag_aliases_parse_the_same() {
+    let selector = |input: &str| match &pieces(input, Mode::Runtime)[0] {
+        Piece::Selector { selector, .. } => selector.clone(),
+        other => panic!("{input:?}: expected a selector, got {other:?}"),
+    };
+    assert_eq!(selector("<sel:@a>"), selector("<selector:@a>"));
+
+    let source = |input: &str| match &pieces(input, Mode::Runtime)[0] {
+        Piece::Nbt { source, path, .. } => (source.clone(), path.clone()),
+        other => panic!("{input:?}: expected an nbt piece, got {other:?}"),
+    };
+    assert_eq!(
+        source("<data:entity:'@s':Health>"),
+        source("<nbt:entity:'@s':Health>")
+    );
+    assert_eq!(
+        source("<nbt:storage:'my:key':path>").0,
+        NbtSourceIr::Storage("my:key".to_string())
+    );
+}
+
+#[test]
+fn transition_picks_one_color_off_the_gradient() {
+    let color = |input: &str| pieces(input, Mode::Runtime)[0].style().color.clone();
+    assert_eq!(
+        color("<transition:red:blue:1>x"),
+        Some(ColorIr::Rgb(0x55, 0x55, 0xFF))
+    );
+    assert_eq!(
+        color("<transition:red:blue:-0.5>x"),
+        color("<transition:red:blue:0.5>x")
+    );
+    assert_eq!(
+        color("<transition:red:blue>x"),
+        color("<transition:red:blue:0>x")
+    );
+}
+
+#[test]
+fn uuids_take_both_spellings() {
+    let hover = |input: &str| pieces(input, Mode::Runtime)[0].style().hover.clone();
+    assert_eq!(
+        hover("<hover:show_entity:pig:1f085b2d-9548-4159-a8c7-f3ccdf0c2054>x"),
+        hover("<hover:show_entity:pig:1f085b2d95484159a8c7f3ccdf0c2054>x")
+    );
+    assert!(matches!(
+        hover("<hover:show_entity:pig:1f085b2d-9548-4159-a8c7-f3ccdf0c2054>x"),
+        Some(HoverIr::Entity { uuid, name: None, .. }) if uuid == NOTCH
+    ));
+}
+
+#[test]
+fn nbt_takes_a_separator_and_interpret() {
+    let piece = |input: &str| match &pieces(input, Mode::Runtime)[0] {
+        Piece::Nbt {
+            interpret,
+            separator,
+            ..
+        } => (*interpret, separator.is_some()),
+        other => panic!("{input:?}: expected an nbt piece, got {other:?}"),
+    };
+    assert_eq!(piece("<nbt:entity:'@s':Health>"), (false, false));
+    assert_eq!(piece("<nbt:entity:'@s':Health:interpret>"), (true, false));
+    assert_eq!(piece("<nbt:entity:'@s':Health:' '>"), (false, true));
+    assert_eq!(
+        piece("<nbt:entity:'@s':Health:' ':interpret>"),
+        (true, true)
+    );
+}
+
+#[test]
+fn head_names_the_player_three_ways() {
+    let head = |input: &str| match &pieces(input, Mode::Runtime)[0] {
+        Piece::Head { player, hat, .. } => (player.clone(), *hat),
+        other => panic!("{input:?}: expected a head, got {other:?}"),
+    };
+    assert_eq!(
+        head("<head:Notch>"),
+        (HeadIr::Name("Notch".to_string()), true)
+    );
+    assert_eq!(
+        head("<head:1f085b2d-9548-4159-a8c7-f3ccdf0c2054>"),
+        (HeadIr::Uuid(NOTCH), true)
+    );
+    assert_eq!(
+        head("<head:'minecraft:textures/entity/steve'>"),
+        (
+            HeadIr::Texture("minecraft:textures/entity/steve".to_string()),
+            true
+        )
+    );
+    assert!(!head("<head:Notch:false>").1);
+}
+
+#[test]
+fn sprite_defaults_to_the_block_atlas() {
+    assert!(matches!(
+        &pieces("<sprite:x>", Mode::Runtime)[0],
+        Piece::Sprite { atlas, sprite, .. } if atlas == "minecraft:blocks" && sprite == "x"
+    ));
+    assert!(matches!(
+        &pieces("<sprite:blocks:x>", Mode::Runtime)[0],
+        Piece::Sprite { atlas, .. } if atlas == "blocks"
+    ));
+}
+
+#[test]
+fn nested_templates_carry_their_holes() {
+    assert!(pieces("<selector:@a:'{name}'>", Mode::Runtime)[0].has_dyn());
+    assert!(!pieces("<selector:@a:', '>", Mode::Runtime)[0].has_dyn());
+    assert!(pieces("<nbt:entity:'@s':Health:'{sep}'>", Mode::Runtime)[0].has_dyn());
+    assert!(
+        pieces(
+            "<hover:show_entity:pig:1f085b2d95484159a8c7f3ccdf0c2054:'{n}'>x",
+            Mode::Runtime
+        )[0]
+        .has_dyn()
+    );
+    assert!(!pieces("<hover:show_item:'minecraft:stone':3>x", Mode::Runtime)[0].has_dyn());
+}
+
+fn static_bytes(input: &str) -> Vec<u8> {
+    emit(&pieces(input, Mode::Runtime))
+        .unwrap()
+        .iter()
+        .filter_map(|seg| match seg {
+            NbtSeg::Bytes(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
+fn holds(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn unresolved_content_becomes_its_own_segment() {
+    let segs = emit(&pieces("<score:a:b/>", Mode::Runtime)).unwrap();
+    assert!(
+        segs.iter().any(|seg| matches!(
+            seg,
+            NbtSeg::Unresolved {
+                what: Unresolved::Scoreboard,
+                ..
+            }
+        )),
+        "{segs:?}"
+    );
+}
+
+#[test]
+fn sprite_writes_the_atlas_only_when_it_differs() {
+    assert!(holds(
+        &static_bytes("<sprite:blocks:x/>"),
+        &to_mutf8("atlas")
+    ));
+    assert!(!holds(&static_bytes("<sprite:x/>"), &to_mutf8("atlas")));
+}
+
+#[test]
+fn show_item_writes_the_count_only_when_it_differs() {
+    let one = static_bytes("<hover:show_item:'minecraft:stone'>x</hover>");
+    assert!(holds(&one, &to_mutf8("show_item")));
+    assert!(!holds(&one, &to_mutf8("count")));
+    assert!(holds(
+        &static_bytes("<hover:show_item:'minecraft:stone':3>x</hover>"),
+        &to_mutf8("count")
+    ));
+}
+
+#[test]
+fn show_entity_writes_the_uuid_as_an_int_array() {
+    let bytes =
+        static_bytes("<hover:show_entity:pig:1f085b2d-9548-4159-a8c7-f3ccdf0c2054>x</hover>");
+    let mut needle = to_mutf8("uuid");
+    needle.extend_from_slice(&4i32.to_be_bytes());
+    needle.extend_from_slice(&NOTCH);
+    assert!(holds(&bytes, &needle));
 }

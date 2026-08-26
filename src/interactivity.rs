@@ -1,4 +1,5 @@
-use uuid::Uuid;
+/// The UUID type `ShowEntity` and player heads carry.
+pub use uuid::Uuid;
 
 #[cfg(feature = "custom")]
 use crate::custom::CustomData;
